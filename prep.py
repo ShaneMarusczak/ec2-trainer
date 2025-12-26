@@ -21,6 +21,7 @@ import argparse
 import random
 import shutil
 import hashlib
+import sys
 import yaml
 import boto3
 from pathlib import Path
@@ -331,20 +332,321 @@ def upload_to_s3(job_dir, bucket):
     print(f"  aws s3 cp {job_dir}/config.yaml s3://{bucket}/jobs/{job_id}/config.yaml")
 
 
+def interactive_mode():
+    """Interactive TUI walkthrough for creating a training job."""
+    print("=" * 60)
+    print("  EC2 YOLO Training - Job Setup Wizard")
+    print("=" * 60)
+
+    # Step 1: Mode selection
+    print("\n[1/6] What do you want to do?\n")
+    print("  1. Prep raw images + labels (need to split train/val)")
+    print("  2. Merge multiple datasets (already have train/val splits)")
+    print("  3. Upload existing YOLO dataset (already structured)")
+    print()
+
+    mode = input("Choose [1/2/3]: ").strip()
+    while mode not in ['1', '2', '3']:
+        mode = input("Please enter 1, 2, or 3: ").strip()
+
+    if mode == '1':
+        return interactive_prep()
+    elif mode == '2':
+        return interactive_merge()
+    else:
+        return interactive_upload_existing()
+
+
+def interactive_prep():
+    """Interactive prep mode."""
+    print("\n[2/6] Where are your images + labels?\n")
+    print("  Expected: folder with image.jpg + image.txt pairs")
+    print()
+
+    input_dir = input("Path to folder: ").strip()
+    input_dir = Path(input_dir).expanduser()
+
+    while not input_dir.exists():
+        print(f"  Directory not found: {input_dir}")
+        input_dir = Path(input("Path to folder: ").strip()).expanduser()
+
+    # Count pairs
+    pairs = find_image_label_pairs(input_dir)
+    print(f"\n  Found {len(pairs)} image/label pairs")
+
+    if not pairs:
+        print("  No valid pairs found. Check that .txt labels exist.")
+        return None
+
+    # Classes
+    print("\n[3/6] What classes are in your labels?\n")
+    print("  Enter comma-separated class names in order (class 0, class 1, ...)")
+    print("  Example: chicken,egg")
+    print()
+
+    classes_str = input("Classes: ").strip()
+    classes = [c.strip() for c in classes_str.split(',')]
+    print(f"\n  Classes: {classes}")
+
+    # Job ID
+    print("\n[4/6] Give this job a unique ID\n")
+    print("  Example: chicken-detector-v1")
+    print()
+
+    job_id = input("Job ID: ").strip()
+    while not job_id or ' ' in job_id:
+        print("  Job ID cannot be empty or contain spaces")
+        job_id = input("Job ID: ").strip()
+
+    # Val split
+    print("\n[5/6] Train/validation split\n")
+    val_split = input("Validation ratio [0.2]: ").strip() or "0.2"
+    val_split = float(val_split)
+
+    # Training config
+    config = interactive_training_config()
+
+    # Confirm
+    print("\n" + "=" * 60)
+    print("  Summary")
+    print("=" * 60)
+    print(f"  Input:      {input_dir}")
+    print(f"  Pairs:      {len(pairs)}")
+    print(f"  Classes:    {classes}")
+    print(f"  Job ID:     {job_id}")
+    print(f"  Val split:  {val_split:.0%}")
+    print(f"  Model:      {config['model']}")
+    print(f"  Instance:   {config['instance_type']}")
+    print(f"  Epochs:     {config['epochs']}")
+    print()
+
+    confirm = input("Proceed? [Y/n]: ").strip().lower()
+    if confirm and confirm != 'y':
+        print("Cancelled.")
+        return None
+
+    # Run prep
+    job_dir = prep_dataset(
+        input_dir=str(input_dir),
+        classes=classes,
+        job_id=job_id,
+        val_split=val_split,
+    )
+
+    # Update config
+    with open(job_dir / 'config.yaml', 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+    return interactive_upload_prompt(job_dir)
+
+
+def interactive_merge():
+    """Interactive merge mode."""
+    print("\n[2/6] Enter dataset directories to merge\n")
+    print("  Enter paths one per line, empty line when done")
+    print("  Example: ./dataset1")
+    print()
+
+    datasets = []
+    while True:
+        path = input(f"Dataset {len(datasets) + 1} (or Enter to finish): ").strip()
+        if not path:
+            if len(datasets) < 2:
+                print("  Need at least 2 datasets to merge")
+                continue
+            break
+
+        path = Path(path).expanduser()
+        if not path.exists():
+            print(f"  Not found: {path}")
+            continue
+
+        # Check for data.yaml
+        if not (path / 'data.yaml').exists():
+            found = list(path.rglob('data.yaml'))
+            if not found:
+                print(f"  No data.yaml found in {path}")
+                continue
+
+        datasets.append(str(path))
+        print(f"  Added: {path}")
+
+    print(f"\n  Merging {len(datasets)} datasets")
+
+    # Job ID
+    print("\n[3/6] Give this job a unique ID\n")
+    job_id = input("Job ID: ").strip()
+    while not job_id or ' ' in job_id:
+        print("  Job ID cannot be empty or contain spaces")
+        job_id = input("Job ID: ").strip()
+
+    # Training config
+    config = interactive_training_config()
+
+    # Confirm
+    print("\n" + "=" * 60)
+    print("  Summary")
+    print("=" * 60)
+    print(f"  Datasets:   {len(datasets)}")
+    for ds in datasets:
+        print(f"              - {ds}")
+    print(f"  Job ID:     {job_id}")
+    print(f"  Model:      {config['model']}")
+    print(f"  Instance:   {config['instance_type']}")
+    print(f"  Epochs:     {config['epochs']}")
+    print()
+
+    confirm = input("Proceed? [Y/n]: ").strip().lower()
+    if confirm and confirm != 'y':
+        print("Cancelled.")
+        return None
+
+    # Run merge
+    job_dir = merge_datasets(
+        dataset_dirs=datasets,
+        job_id=job_id,
+    )
+
+    # Update config
+    with open(job_dir / 'config.yaml', 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+    return interactive_upload_prompt(job_dir)
+
+
+def interactive_upload_existing():
+    """Upload an already-structured YOLO dataset."""
+    print("\n[2/6] Where is your dataset?\n")
+    print("  Expected structure:")
+    print("    dataset/")
+    print("      data.yaml")
+    print("      train/images/, train/labels/")
+    print("      valid/images/, valid/labels/")
+    print()
+
+    dataset_dir = Path(input("Path to dataset: ").strip()).expanduser()
+
+    while not (dataset_dir / 'data.yaml').exists():
+        print(f"  No data.yaml found in {dataset_dir}")
+        dataset_dir = Path(input("Path to dataset: ").strip()).expanduser()
+
+    # Job ID
+    print("\n[3/6] Give this job a unique ID\n")
+    job_id = input("Job ID: ").strip()
+    while not job_id or ' ' in job_id:
+        job_id = input("Job ID: ").strip()
+
+    # Training config
+    config = interactive_training_config()
+
+    # Create job structure
+    job_dir = Path('./jobs') / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy dataset
+    dest_dataset = job_dir / 'dataset'
+    if dest_dataset.exists():
+        shutil.rmtree(dest_dataset)
+    shutil.copytree(dataset_dir, dest_dataset)
+
+    # Write config
+    with open(job_dir / 'config.yaml', 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+    print(f"\n  Created job at: {job_dir}")
+
+    return interactive_upload_prompt(job_dir)
+
+
+def interactive_training_config():
+    """Interactive training configuration."""
+    print("\n[5/6] Training configuration\n")
+
+    # Model
+    print("  Available models:")
+    print("    1. yolo12n.pt  (nano - fastest, least accurate)")
+    print("    2. yolo12s.pt  (small)")
+    print("    3. yolo12m.pt  (medium - recommended)")
+    print("    4. yolo12l.pt  (large)")
+    print("    5. yolo12x.pt  (xlarge - slowest, most accurate)")
+    print()
+
+    model_choice = input("Model [3]: ").strip() or "3"
+    models = {
+        '1': 'yolo12n.pt', '2': 'yolo12s.pt', '3': 'yolo12m.pt',
+        '4': 'yolo12l.pt', '5': 'yolo12x.pt'
+    }
+    model = models.get(model_choice, 'yolo12m.pt')
+
+    # Instance type
+    print("\n  Instance types (GPU):")
+    print("    1. g5.xlarge   (~$1.00/hr - 1x A10G, 24GB)")
+    print("    2. g5.2xlarge  (~$1.50/hr - 1x A10G, 24GB, more CPU)")
+    print("    3. g4dn.xlarge (~$0.50/hr - 1x T4, 16GB)")
+    print()
+
+    instance_choice = input("Instance [1]: ").strip() or "1"
+    instances = {
+        '1': 'g5.xlarge', '2': 'g5.2xlarge', '3': 'g4dn.xlarge'
+    }
+    instance_type = instances.get(instance_choice, 'g5.xlarge')
+
+    # Epochs
+    epochs = input("\nEpochs [120]: ").strip() or "120"
+    epochs = int(epochs)
+
+    # Batch size
+    batch = input("Batch size [16]: ").strip() or "16"
+    batch = int(batch)
+
+    config = {
+        'model': model,
+        'instance_type': instance_type,
+        'epochs': epochs,
+        'batch': batch,
+        'imgsz': 640,
+        'patience': 20,
+    }
+
+    return config
+
+
+def interactive_upload_prompt(job_dir):
+    """Prompt to upload to S3."""
+    print("\n[6/6] Upload to S3?\n")
+
+    upload = input("Upload now? [y/N]: ").strip().lower()
+    if upload != 'y':
+        print(f"\nJob ready at: {job_dir}")
+        print(f"\nTo upload later:")
+        print(f"  python prep.py upload {job_dir} --bucket YOUR_BUCKET")
+        return job_dir
+
+    bucket = input("S3 bucket name: ").strip()
+    while not bucket:
+        bucket = input("S3 bucket name: ").strip()
+
+    upload_to_s3(job_dir, bucket)
+    return job_dir
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Prepare dataset for EC2 training pipeline',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+    # Interactive wizard (recommended)
+    python prep.py
+
     # Prep raw images + labels
     python prep.py ./chicken_photos --classes chicken --job-id chicken-v1
 
     # Merge multiple Roboflow exports
     python prep.py merge ./dataset1 ./dataset2 --job-id combined-v1
 
-    # Upload after prep
-    python prep.py ./data --classes chicken --job-id chicken-v1 --upload --bucket my-bucket
+    # Upload existing job
+    python prep.py upload ./jobs/my-job --bucket my-bucket
         """
     )
 
@@ -359,6 +661,11 @@ Examples:
     merge_parser.add_argument('--bucket', help='S3 bucket name')
     merge_parser.add_argument('--seed', type=int, default=42, help='Random seed')
 
+    # Upload subcommand
+    upload_parser = subparsers.add_parser('upload', help='Upload a prepared job to S3')
+    upload_parser.add_argument('job_dir', help='Job directory to upload')
+    upload_parser.add_argument('--bucket', required=True, help='S3 bucket name')
+
     # Default: prep mode (for backwards compatibility, input_dir is positional)
     parser.add_argument('input_dir', nargs='?', help='Directory with images + YOLO labels')
     parser.add_argument('--classes', help='Comma-separated class names')
@@ -371,34 +678,51 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.upload and not args.bucket:
-        parser.error("--bucket is required when using --upload")
+    # No args = interactive mode
+    if len(sys.argv) == 1:
+        interactive_mode()
+        return
+
+    if args.command == 'upload':
+        upload_to_s3(args.job_dir, args.bucket)
+        return
 
     if args.command == 'merge':
+        if args.upload and not args.bucket:
+            parser.error("--bucket is required when using --upload")
         job_dir = merge_datasets(
             dataset_dirs=args.datasets,
             job_id=args.job_id,
             output_dir=args.output_dir,
             seed=args.seed,
         )
-    else:
-        # Prep mode
-        if not args.input_dir:
-            parser.error("input_dir is required")
-        if not args.classes:
-            parser.error("--classes is required")
-        if not args.job_id:
-            parser.error("--job-id is required")
+        if args.upload:
+            upload_to_s3(job_dir, args.bucket)
+        return
 
-        classes = [c.strip() for c in args.classes.split(',')]
-        job_dir = prep_dataset(
-            input_dir=args.input_dir,
-            classes=classes,
-            job_id=args.job_id,
-            val_split=args.val_split,
-            output_dir=args.output_dir,
-            seed=args.seed,
-        )
+    # Prep mode
+    if args.upload and not args.bucket:
+        parser.error("--bucket is required when using --upload")
+
+    if not args.input_dir:
+        # No input_dir and not a subcommand = interactive
+        interactive_mode()
+        return
+
+    if not args.classes:
+        parser.error("--classes is required")
+    if not args.job_id:
+        parser.error("--job-id is required")
+
+    classes = [c.strip() for c in args.classes.split(',')]
+    job_dir = prep_dataset(
+        input_dir=args.input_dir,
+        classes=classes,
+        job_id=args.job_id,
+        val_split=args.val_split,
+        output_dir=args.output_dir,
+        seed=args.seed,
+    )
 
     if args.upload:
         upload_to_s3(job_dir, args.bucket)
