@@ -120,7 +120,7 @@ def main():
     # Create spot request
     create_spot_request(job_id, config['instance_type'], bucket, infra)
 
-    print("\nTraining started! Run status.py to check progress.")
+    print("\nTraining started! Run pull.py to check progress.")
 
 
 def load_infra_config():
