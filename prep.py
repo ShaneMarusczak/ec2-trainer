@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
 """
-Dataset prep wizard for EC2 training pipeline.
+EC2 YOLO Training - Dataset prep and job launcher.
 
 Usage:
     python prep.py
 """
 
+import base64
 import shutil
 import hashlib
 import sys
 import yaml
 import boto3
 from pathlib import Path
+from botocore.exceptions import ClientError
+
+CONFIG_FILE = Path.home() / '.ec2-trainer.yaml'
 
 
 def main():
     print("=" * 60)
-    print("  EC2 YOLO Training - Job Setup")
+    print("  EC2 YOLO Training")
     print("=" * 60)
+
+    # Load or create infrastructure config
+    infra = load_infra_config()
 
     # Collect datasets
     print("\nDatasets to upload (Enter when done):\n")
@@ -68,6 +75,9 @@ def main():
     # Training config
     config = get_training_config()
 
+    # S3 bucket
+    bucket = pick_bucket()
+
     # Summary
     print("\n" + "=" * 60)
     print("  Summary")
@@ -82,12 +92,13 @@ def main():
     print(f"  Model:    {config['model']}")
     print(f"  Instance: {config['instance_type']}")
     print(f"  Epochs:   {config['epochs']}")
+    print(f"  Bucket:   {bucket}")
 
     if input("\nProceed? [Y/n]: ").strip().lower() not in ['', 'y']:
         print("Cancelled.")
         return
 
-    # Process
+    # Process datasets
     if len(datasets) == 1:
         job_dir = copy_single_dataset(datasets[0], job_id)
     else:
@@ -97,7 +108,44 @@ def main():
     with open(job_dir / 'config.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
 
-    # Upload
+    # Upload to S3
+    upload_to_s3(job_dir, bucket, job_id)
+
+    # Create spot request
+    create_spot_request(job_id, config['instance_type'], bucket, infra)
+
+    print(f"\nTraining started! You'll get an SMS when it's done.")
+
+
+def load_infra_config():
+    """Load or create infrastructure config."""
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            config = yaml.safe_load(f)
+        print(f"\nUsing config from {CONFIG_FILE}")
+        return config
+
+    print(f"\nFirst run - need AWS infrastructure config.")
+    print("(This will be saved to ~/.ec2-trainer.yaml)\n")
+
+    config = {
+        'efs_id': input("EFS ID (fs-xxxxx): ").strip(),
+        'sns_topic_arn': input("SNS Topic ARN: ").strip(),
+        'subnet_id': input("Subnet ID (subnet-xxxxx): ").strip(),
+        'security_group_id': input("Security Group ID (sg-xxxxx): ").strip(),
+        'iam_instance_profile': input("IAM Instance Profile name: ").strip(),
+        'ami_id': input("AMI ID [ami-0c7217cdde317cfec]: ").strip() or 'ami-0c7217cdde317cfec',
+    }
+
+    with open(CONFIG_FILE, 'w') as f:
+        yaml.dump(config, f)
+    print(f"\nSaved to {CONFIG_FILE}")
+
+    return config
+
+
+def pick_bucket():
+    """Pick S3 bucket."""
     print("\nS3 bucket:")
     try:
         response = boto3.client('s3').list_buckets()
@@ -107,17 +155,44 @@ def main():
                 print(f"  {i}. {b}")
             choice = input("\n> ").strip()
             if choice.isdigit() and 1 <= int(choice) <= len(buckets):
-                bucket = buckets[int(choice) - 1]
-            else:
-                bucket = choice or buckets[0]
-        else:
-            bucket = input("\n> ").strip()
+                return buckets[int(choice) - 1]
+            return choice or buckets[0]
     except Exception:
-        bucket = input("\n> ").strip()
+        pass
+    bucket = input("\n> ").strip()
     while not bucket:
         bucket = input("> ").strip()
+    return bucket
 
-    upload_to_s3(job_dir, bucket)
+
+def get_training_config():
+    """Get training configuration."""
+    print("\nTraining config:\n")
+
+    # Model: generation + size
+    print("  Model (e.g., 12m, 11s, 8x):")
+    model_input = input("  [12m]: ").strip().lower() or "12m"
+
+    gen = ''.join(c for c in model_input if c.isdigit()) or '12'
+    size = ''.join(c for c in model_input if c.isalpha()) or 'm'
+    if size not in ['n', 's', 'm', 'l', 'x']:
+        size = 'm'
+    model = f"yolo{gen}{size}.pt"
+
+    print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge, p3.2xlarge):")
+    instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
+
+    epochs = int(input("\n  Epochs [120]: ").strip() or "120")
+    batch = int(input("  Batch [16]: ").strip() or "16")
+
+    return {
+        'model': model,
+        'instance_type': instance_type,
+        'epochs': epochs,
+        'batch': batch,
+        'imgsz': 640,
+        'patience': 20,
+    }
 
 
 def copy_single_dataset(dataset_path, job_id):
@@ -138,7 +213,6 @@ def merge_datasets(dataset_paths, job_id):
     """Merge multiple YOLO datasets."""
     print(f"\nMerging {len(dataset_paths)} datasets...")
 
-    # Collect classes from all datasets
     all_classes = {}
     dataset_configs = []
 
@@ -158,7 +232,6 @@ def merge_datasets(dataset_paths, job_id):
     unified_classes = sorted(all_classes.keys())
     print(f"  Unified classes: {unified_classes}")
 
-    # Create output
     job_dir = Path('./jobs') / job_id
     dataset_dir = job_dir / 'dataset'
 
@@ -166,7 +239,6 @@ def merge_datasets(dataset_paths, job_id):
         (dataset_dir / split / 'images').mkdir(parents=True, exist_ok=True)
         (dataset_dir / split / 'labels').mkdir(parents=True, exist_ok=True)
 
-    # Copy and remap
     image_hashes = {}
     stats = {'images': 0, 'duplicates': 0}
 
@@ -174,7 +246,6 @@ def merge_datasets(dataset_paths, job_id):
         ds_path = ds_info['path']
         ds_classes = ds_info['classes']
 
-        # Class ID remapping
         class_remap = {i: unified_classes.index(cls) for i, cls in enumerate(ds_classes)}
 
         for split in ['train', 'valid']:
@@ -188,7 +259,6 @@ def merge_datasets(dataset_paths, job_id):
                 if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png', '.webp']:
                     continue
 
-                # Deduplicate
                 img_hash = hashlib.md5(img_path.read_bytes()).hexdigest()
                 if img_hash in image_hashes:
                     stats['duplicates'] += 1
@@ -198,7 +268,6 @@ def merge_datasets(dataset_paths, job_id):
                 if not lbl_path.exists():
                     continue
 
-                # Remap class IDs
                 new_lines = []
                 for line in lbl_path.read_text().strip().split('\n'):
                     if not line.strip():
@@ -211,7 +280,6 @@ def merge_datasets(dataset_paths, job_id):
                 if not new_lines:
                     continue
 
-                # Copy with prefix
                 prefix = ds_path.name.replace(' ', '_')
                 shutil.copy(img_path, dataset_dir / split / 'images' / f"{prefix}_{img_path.name}")
                 (dataset_dir / split / 'labels' / f"{prefix}_{img_path.stem}.txt").write_text('\n'.join(new_lines))
@@ -219,7 +287,6 @@ def merge_datasets(dataset_paths, job_id):
                 image_hashes[img_hash] = True
                 stats['images'] += 1
 
-    # Create data.yaml
     with open(dataset_dir / 'data.yaml', 'w') as f:
         yaml.dump({
             'path': '.',
@@ -235,42 +302,9 @@ def merge_datasets(dataset_paths, job_id):
     return job_dir
 
 
-def get_training_config():
-    """Get training configuration."""
-    print("\nTraining config:\n")
-
-    # Model: generation + size
-    print("  Model (e.g., 12m, 11s, 8x):")
-    model_input = input("  [12m]: ").strip().lower() or "12m"
-
-    # Parse generation and size
-    gen = ''.join(c for c in model_input if c.isdigit()) or '12'
-    size = ''.join(c for c in model_input if c.isalpha()) or 'm'
-    if size not in ['n', 's', 'm', 'l', 'x']:
-        size = 'm'
-    model = f"yolo{gen}{size}.pt"
-
-    # Instance - show common options but accept any
-    print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge, p3.2xlarge):")
-    instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
-
-    epochs = int(input("\n  Epochs [120]: ").strip() or "120")
-    batch = int(input("  Batch [16]: ").strip() or "16")
-
-    return {
-        'model': model,
-        'instance_type': instance_type,
-        'epochs': epochs,
-        'batch': batch,
-        'imgsz': 640,
-        'patience': 20,
-    }
-
-
-def upload_to_s3(job_dir, bucket):
+def upload_to_s3(job_dir, bucket, job_id):
     """Upload job to S3."""
     s3 = boto3.client('s3')
-    job_id = job_dir.name
 
     print(f"\nUploading to s3://{bucket}/jobs/{job_id}/")
 
@@ -282,7 +316,77 @@ def upload_to_s3(job_dir, bucket):
             count += 1
 
     print(f"  Uploaded {count} files")
-    print(f"\nTraining will start automatically!")
+
+
+def create_spot_request(job_id, instance_type, bucket, infra):
+    """Create a persistent spot request for this job."""
+    ec2 = boto3.client('ec2')
+
+    # Check if already running
+    response = ec2.describe_spot_instance_requests(
+        Filters=[
+            {'Name': 'state', 'Values': ['open', 'active']},
+            {'Name': 'tag:JobId', 'Values': [job_id]}
+        ]
+    )
+    if response['SpotInstanceRequests']:
+        print(f"\nSpot request already exists for {job_id}")
+        return
+
+    user_data = f"""#!/bin/bash
+export JOB_ID="{job_id}"
+export S3_BUCKET="{bucket}"
+export SNS_TOPIC_ARN="{infra['sns_topic_arn']}"
+export EFS_ID="{infra['efs_id']}"
+
+# Mount EFS
+mkdir -p /mnt/efs
+mount -t efs {infra['efs_id']}:/ /mnt/efs
+
+# Install dependencies
+pip install ultralytics boto3 pyyaml requests
+
+# Download and run trainer
+aws s3 cp s3://{bucket}/trainer/train.py /home/ubuntu/train.py
+cd /home/ubuntu
+python train.py
+"""
+
+    user_data_b64 = base64.b64encode(user_data.encode()).decode()
+
+    ec2.request_spot_instances(
+        InstanceCount=1,
+        Type='persistent',
+        LaunchSpecification={
+            'ImageId': infra['ami_id'],
+            'InstanceType': instance_type,
+            'UserData': user_data_b64,
+            'SubnetId': infra['subnet_id'],
+            'SecurityGroupIds': [infra['security_group_id']],
+            'IamInstanceProfile': {'Name': infra['iam_instance_profile']},
+            'BlockDeviceMappings': [
+                {
+                    'DeviceName': '/dev/sda1',
+                    'Ebs': {
+                        'VolumeSize': 100,
+                        'VolumeType': 'gp3',
+                        'DeleteOnTermination': True
+                    }
+                }
+            ]
+        },
+        TagSpecifications=[
+            {
+                'ResourceType': 'spot-instances-request',
+                'Tags': [
+                    {'Key': 'Name', 'Value': f'trainer-{job_id}'},
+                    {'Key': 'JobId', 'Value': job_id}
+                ]
+            }
+        ]
+    )
+
+    print(f"\nCreated spot request for {job_id} on {instance_type}")
 
 
 if __name__ == '__main__':
