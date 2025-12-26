@@ -13,7 +13,6 @@ import sys
 import yaml
 import boto3
 from pathlib import Path
-from botocore.exceptions import ClientError
 
 CONFIG_FILE = Path.home() / '.ec2-trainer.yaml'
 
@@ -67,7 +66,7 @@ def main():
         print(f"  Added: {path.name} ({len(classes)} classes: {classes})")
 
     # Job ID
-    print(f"\nJob ID (e.g., spaghetti-v1):")
+    print("\nJob ID (e.g., spaghetti-v1):")
     job_id = input("\n> ").strip()
     while not job_id or ' ' in job_id:
         job_id = input("> ").strip()
@@ -76,7 +75,7 @@ def main():
     config = get_training_config()
 
     # S3 bucket
-    bucket = pick_bucket()
+    bucket = pick_bucket(infra)
 
     # Summary
     print("\n" + "=" * 60)
@@ -98,6 +97,13 @@ def main():
         print("Cancelled.")
         return
 
+    # Check if job already exists
+    if job_exists(bucket, job_id):
+        print(f"\n  Warning: Job '{job_id}' already exists in S3!")
+        if input("  Overwrite? [y/N]: ").strip().lower() != 'y':
+            print("Cancelled.")
+            return
+
     # Process datasets
     if len(datasets) == 1:
         job_dir = copy_single_dataset(datasets[0], job_id)
@@ -114,7 +120,7 @@ def main():
     # Create spot request
     create_spot_request(job_id, config['instance_type'], bucket, infra)
 
-    print(f"\nTraining started! You'll get an SMS when it's done.")
+    print("\nTraining started! You'll get an SMS when it's done.")
 
 
 def load_infra_config():
@@ -125,7 +131,7 @@ def load_infra_config():
         print(f"\nUsing config from {CONFIG_FILE}")
         return config
 
-    print(f"\nFirst run - need AWS infrastructure config.")
+    print("\nFirst run - need AWS infrastructure config.")
     print("(This will be saved to ~/.ec2-trainer.yaml)\n")
 
     config = {
@@ -144,8 +150,20 @@ def load_infra_config():
     return config
 
 
-def pick_bucket():
-    """Pick S3 bucket."""
+def pick_bucket(infra):
+    """Pick S3 bucket (remembers last used)."""
+    saved = infra.get('bucket')
+    if saved:
+        print(f"\nS3 bucket [{saved}]:")
+        choice = input("> ").strip()
+        if not choice:
+            return saved
+        if choice.isdigit():
+            # User wants to pick from list
+            pass
+        else:
+            return save_bucket(choice)
+
     print("\nS3 bucket:")
     try:
         response = boto3.client('s3').list_buckets()
@@ -155,14 +173,39 @@ def pick_bucket():
                 print(f"  {i}. {b}")
             choice = input("\n> ").strip()
             if choice.isdigit() and 1 <= int(choice) <= len(buckets):
-                return buckets[int(choice) - 1]
-            return choice or buckets[0]
+                return save_bucket(buckets[int(choice) - 1])
+            return save_bucket(choice or buckets[0])
     except Exception:
         pass
     bucket = input("\n> ").strip()
     while not bucket:
         bucket = input("> ").strip()
+    return save_bucket(bucket)
+
+
+def save_bucket(bucket):
+    """Save bucket to config for next time."""
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            config = yaml.safe_load(f) or {}
+        config['bucket'] = bucket
+        with open(CONFIG_FILE, 'w') as f:
+            yaml.dump(config, f)
     return bucket
+
+
+def job_exists(bucket, job_id):
+    """Check if job already exists in S3."""
+    try:
+        s3 = boto3.client('s3')
+        response = s3.list_objects_v2(
+            Bucket=bucket,
+            Prefix=f"jobs/{job_id}/",
+            MaxKeys=1
+        )
+        return response.get('KeyCount', 0) > 0
+    except Exception:
+        return False
 
 
 def get_training_config():
