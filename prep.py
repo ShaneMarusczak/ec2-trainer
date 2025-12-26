@@ -2,39 +2,29 @@
 """
 Dataset prep script for EC2 training pipeline.
 
-Takes a folder of images + YOLO labels and prepares it for S3 upload.
+Two modes:
+1. PREP MODE: Takes raw images + labels, splits train/val, creates structure
+2. MERGE MODE: Combines multiple YOLO datasets (e.g., from Roboflow exports)
 
 Usage:
+    # Prep raw images + labels
     python prep.py ./my_images --classes chicken,egg --job-id chicken-v1
-    python prep.py ./my_images --classes chicken --job-id chicken-v1 --upload
 
-Expected input structure (YOLO format):
-    my_images/
-        image1.jpg
-        image1.txt      # YOLO format: class_id x_center y_center width height
-        image2.jpg
-        image2.txt
-        ...
+    # Merge multiple Roboflow exports
+    python prep.py merge ./dataset1 ./dataset2 ./dataset3 --job-id combined-v1
 
-Output structure:
-    jobs/chicken-v1/
-        config.yaml
-        dataset/
-            data.yaml
-            train/
-                images/
-                labels/
-            valid/
-                images/
-                labels/
+    # Upload after prep/merge
+    python prep.py ... --upload --bucket my-bucket
 """
 
 import argparse
 import random
 import shutil
+import hashlib
 import yaml
 import boto3
 from pathlib import Path
+from collections import Counter
 
 
 def find_image_label_pairs(input_dir):
@@ -151,6 +141,174 @@ def prep_dataset(input_dir, classes, job_id, val_split=0.2, output_dir='./jobs',
     return job_dir
 
 
+def hash_image(img_path):
+    """MD5 hash for deduplication."""
+    return hashlib.md5(Path(img_path).read_bytes()).hexdigest()
+
+
+def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
+    """
+    Merge multiple YOLO-format datasets (e.g., Roboflow exports).
+
+    - Unifies class names across datasets
+    - Deduplicates images by content hash
+    - Remaps class IDs to unified scheme
+    """
+    random.seed(seed)
+
+    print(f"Merging {len(dataset_dirs)} datasets into: {job_id}")
+
+    # First pass: collect all class names
+    all_classes = {}  # class_name -> count
+    dataset_configs = []
+
+    for ds_path in dataset_dirs:
+        ds_path = Path(ds_path)
+        data_yaml = ds_path / 'data.yaml'
+
+        if not data_yaml.exists():
+            # Try subdirectory (some exports have extra nesting)
+            for f in ds_path.rglob('data.yaml'):
+                data_yaml = f
+                ds_path = f.parent
+                break
+
+        if not data_yaml.exists():
+            print(f"  WARNING: No data.yaml in {ds_path}, skipping")
+            continue
+
+        with open(data_yaml) as f:
+            config = yaml.safe_load(f)
+
+        classes = config.get('names', [])
+        if isinstance(classes, dict):
+            classes = list(classes.values())
+
+        print(f"  {ds_path.name}: {len(classes)} classes - {classes}")
+
+        for cls in classes:
+            all_classes[cls] = all_classes.get(cls, 0) + 1
+
+        dataset_configs.append({
+            'path': ds_path,
+            'classes': classes,
+            'config': config,
+        })
+
+    if not dataset_configs:
+        raise ValueError("No valid datasets found")
+
+    # Create unified class list (sorted for consistency)
+    unified_classes = sorted(all_classes.keys())
+    print(f"\nUnified classes ({len(unified_classes)}): {unified_classes}")
+
+    # Create output structure
+    job_dir = Path(output_dir) / job_id
+    dataset_dir = job_dir / 'dataset'
+
+    for split in ['train', 'valid']:
+        (dataset_dir / split / 'images').mkdir(parents=True, exist_ok=True)
+        (dataset_dir / split / 'labels').mkdir(parents=True, exist_ok=True)
+
+    # Second pass: copy and remap
+    image_hashes = {}
+    stats = {'images': 0, 'duplicates': 0, 'annotations': 0}
+
+    for ds_info in dataset_configs:
+        ds_path = ds_info['path']
+        ds_classes = ds_info['classes']
+
+        # Build class ID remap: old_id -> new_id
+        class_remap = {}
+        for old_id, cls_name in enumerate(ds_classes):
+            class_remap[old_id] = unified_classes.index(cls_name)
+
+        # Process train and valid splits
+        for split in ['train', 'valid']:
+            img_dir = ds_path / split / 'images'
+            lbl_dir = ds_path / split / 'labels'
+
+            if not img_dir.exists():
+                continue
+
+            for img_path in img_dir.iterdir():
+                if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png', '.webp']:
+                    continue
+
+                # Check for duplicate
+                img_hash = hash_image(img_path)
+                if img_hash in image_hashes:
+                    stats['duplicates'] += 1
+                    continue
+
+                # Find label file
+                lbl_path = lbl_dir / f"{img_path.stem}.txt"
+                if not lbl_path.exists():
+                    continue
+
+                # Remap labels
+                new_lines = []
+                for line in lbl_path.read_text().strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    parts = line.split()
+                    old_class_id = int(parts[0])
+                    new_class_id = class_remap.get(old_class_id)
+                    if new_class_id is not None:
+                        parts[0] = str(new_class_id)
+                        new_lines.append(' '.join(parts))
+                        stats['annotations'] += 1
+
+                if not new_lines:
+                    continue
+
+                # Copy with prefixed name to avoid collisions
+                prefix = ds_path.name.replace('/', '_').replace(' ', '_')
+                new_img_name = f"{prefix}_{img_path.name}"
+                new_lbl_name = f"{prefix}_{img_path.stem}.txt"
+
+                shutil.copy(img_path, dataset_dir / split / 'images' / new_img_name)
+                (dataset_dir / split / 'labels' / new_lbl_name).write_text('\n'.join(new_lines))
+
+                image_hashes[img_hash] = new_img_name
+                stats['images'] += 1
+
+    # Create data.yaml
+    data_yaml = {
+        'path': '.',
+        'train': 'train/images',
+        'val': 'valid/images',
+        'nc': len(unified_classes),
+        'names': unified_classes,
+    }
+    with open(dataset_dir / 'data.yaml', 'w') as f:
+        yaml.dump(data_yaml, f, default_flow_style=False)
+
+    # Create config.yaml
+    config = {
+        'model': 'yolo12m.pt',
+        'instance_type': 'g5.xlarge',
+        'epochs': 120,
+        'batch': 16,
+        'imgsz': 640,
+        'patience': 20,
+    }
+    with open(job_dir / 'config.yaml', 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+    # Count per split
+    train_count = len(list((dataset_dir / 'train' / 'images').iterdir()))
+    valid_count = len(list((dataset_dir / 'valid' / 'images').iterdir()))
+
+    print(f"\nMerge complete:")
+    print(f"  Total images: {stats['images']} (removed {stats['duplicates']} duplicates)")
+    print(f"  Total annotations: {stats['annotations']}")
+    print(f"  Train: {train_count}, Valid: {valid_count}")
+    print(f"  Output: {job_dir}")
+
+    return job_dir
+
+
 def upload_to_s3(job_dir, bucket):
     """Upload prepared job to S3."""
     s3 = boto3.client('s3')
@@ -179,44 +337,68 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic prep (creates ./jobs/chicken-v1/)
+    # Prep raw images + labels
     python prep.py ./chicken_photos --classes chicken --job-id chicken-v1
 
-    # Multiple classes
-    python prep.py ./data --classes cat,dog,bird --job-id pets-v1
+    # Merge multiple Roboflow exports
+    python prep.py merge ./dataset1 ./dataset2 --job-id combined-v1
 
-    # Prep and upload to S3
-    python prep.py ./data --classes chicken --job-id chicken-v1 --upload --bucket my-training-bucket
-
-    # Custom validation split
-    python prep.py ./data --classes chicken --job-id chicken-v1 --val-split 0.15
+    # Upload after prep
+    python prep.py ./data --classes chicken --job-id chicken-v1 --upload --bucket my-bucket
         """
     )
 
-    parser.add_argument('input_dir', help='Directory containing images and YOLO label files')
-    parser.add_argument('--classes', required=True, help='Comma-separated class names (order matters!)')
-    parser.add_argument('--job-id', required=True, help='Unique job identifier')
-    parser.add_argument('--val-split', type=float, default=0.2, help='Validation split ratio (default: 0.2)')
-    parser.add_argument('--output-dir', default='./jobs', help='Output directory (default: ./jobs)')
-    parser.add_argument('--upload', action='store_true', help='Upload to S3 after prep')
-    parser.add_argument('--bucket', help='S3 bucket name (required if --upload)')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducible splits')
+    subparsers = parser.add_subparsers(dest='command')
+
+    # Merge subcommand
+    merge_parser = subparsers.add_parser('merge', help='Merge multiple YOLO datasets')
+    merge_parser.add_argument('datasets', nargs='+', help='Dataset directories to merge')
+    merge_parser.add_argument('--job-id', required=True, help='Unique job identifier')
+    merge_parser.add_argument('--output-dir', default='./jobs', help='Output directory')
+    merge_parser.add_argument('--upload', action='store_true', help='Upload to S3 after merge')
+    merge_parser.add_argument('--bucket', help='S3 bucket name')
+    merge_parser.add_argument('--seed', type=int, default=42, help='Random seed')
+
+    # Default: prep mode (for backwards compatibility, input_dir is positional)
+    parser.add_argument('input_dir', nargs='?', help='Directory with images + YOLO labels')
+    parser.add_argument('--classes', help='Comma-separated class names')
+    parser.add_argument('--job-id', help='Unique job identifier')
+    parser.add_argument('--val-split', type=float, default=0.2, help='Validation split (default: 0.2)')
+    parser.add_argument('--output-dir', default='./jobs', help='Output directory')
+    parser.add_argument('--upload', action='store_true', help='Upload to S3')
+    parser.add_argument('--bucket', help='S3 bucket name')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
 
     args = parser.parse_args()
-
-    classes = [c.strip() for c in args.classes.split(',')]
 
     if args.upload and not args.bucket:
         parser.error("--bucket is required when using --upload")
 
-    job_dir = prep_dataset(
-        input_dir=args.input_dir,
-        classes=classes,
-        job_id=args.job_id,
-        val_split=args.val_split,
-        output_dir=args.output_dir,
-        seed=args.seed,
-    )
+    if args.command == 'merge':
+        job_dir = merge_datasets(
+            dataset_dirs=args.datasets,
+            job_id=args.job_id,
+            output_dir=args.output_dir,
+            seed=args.seed,
+        )
+    else:
+        # Prep mode
+        if not args.input_dir:
+            parser.error("input_dir is required")
+        if not args.classes:
+            parser.error("--classes is required")
+        if not args.job_id:
+            parser.error("--job-id is required")
+
+        classes = [c.strip() for c in args.classes.split(',')]
+        job_dir = prep_dataset(
+            input_dir=args.input_dir,
+            classes=classes,
+            job_id=args.job_id,
+            val_split=args.val_split,
+            output_dir=args.output_dir,
+            seed=args.seed,
+        )
 
     if args.upload:
         upload_to_s3(job_dir, args.bucket)
