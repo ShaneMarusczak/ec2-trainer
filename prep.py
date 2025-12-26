@@ -225,13 +225,19 @@ def get_training_config():
     """Get training configuration."""
     print("\nTraining config:\n")
 
-    print("  Model: 1=nano 2=small 3=medium 4=large 5=xlarge")
-    model_choice = input("  [3]: ").strip() or "3"
-    models = {'1': 'yolo12n.pt', '2': 'yolo12s.pt', '3': 'yolo12m.pt',
-              '4': 'yolo12l.pt', '5': 'yolo12x.pt'}
-    model = models.get(model_choice, 'yolo12m.pt')
+    # Model: generation + size
+    print("  Model (e.g., 12m, 11s, 8x):")
+    model_input = input("  [12m]: ").strip().lower() or "12m"
 
-    print("\n  Instance: 1=g5.xlarge($1/hr) 2=g5.2xlarge($1.50) 3=g4dn.xlarge($0.50)")
+    # Parse generation and size
+    gen = ''.join(c for c in model_input if c.isdigit()) or '12'
+    size = ''.join(c for c in model_input if c.isalpha()) or 'm'
+    if size not in ['n', 's', 'm', 'l', 'x']:
+        size = 'm'
+    model = f"yolo{gen}{size}.pt"
+
+    # Instance
+    print("\n  Instance: 1=g5.xlarge 2=g5.2xlarge 3=g4dn.xlarge")
     inst_choice = input("  [1]: ").strip() or "1"
     instances = {'1': 'g5.xlarge', '2': 'g5.2xlarge', '3': 'g4dn.xlarge'}
     instance_type = instances.get(inst_choice, 'g5.xlarge')
