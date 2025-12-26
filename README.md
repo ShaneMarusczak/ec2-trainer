@@ -16,17 +16,19 @@ prep.py → S3 + spot request → EC2 trains → S3 weights → pull.py
 
 ## First Run
 
-prep.py will ask for AWS infrastructure config (saved to `~/.ec2-trainer.yaml`):
-- EFS ID
-- Subnet ID
-- Security Group ID
-- IAM Instance Profile name
-- AMI ID
+First `./run.sh` auto-runs setup.py which creates all AWS infrastructure:
+- S3 bucket
+- EFS file system + mount target
+- Security group (locked down - EFS only)
+- IAM role + instance profile
+
+Config saved to `~/.ec2-trainer.yaml`
 
 ## Files
 
 ```
-run.sh      - Entry point (menu)
+run.sh      - Entry point (auto-setup on first run)
+setup.py    - One-time AWS infrastructure setup
 prep.py     - Upload datasets, start training
 pull.py     - Check status, sync weights
 train.py    - Runs on EC2 (bundled with each job)

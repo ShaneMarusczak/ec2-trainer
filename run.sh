@@ -1,6 +1,16 @@
 #!/bin/bash
 cd "$(dirname "$0")"
 
+# Check if setup needed
+if [ ! -f ~/.ec2-trainer.yaml ]; then
+    echo "============================================================"
+    echo "  EC2 YOLO Training - First Time Setup"
+    echo "============================================================"
+    echo
+    python3 setup.py
+    exit 0
+fi
+
 echo "============================================================"
 echo "  EC2 YOLO Training"
 echo "============================================================"
