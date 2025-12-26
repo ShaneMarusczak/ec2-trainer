@@ -99,7 +99,21 @@ def main():
 
     # Upload
     print("\nS3 bucket:")
-    bucket = input("\n> ").strip()
+    try:
+        response = boto3.client('s3').list_buckets()
+        buckets = [b['Name'] for b in response['Buckets']]
+        if buckets:
+            for i, b in enumerate(buckets, 1):
+                print(f"  {i}. {b}")
+            choice = input("\n> ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(buckets):
+                bucket = buckets[int(choice) - 1]
+            else:
+                bucket = choice or buckets[0]
+        else:
+            bucket = input("\n> ").strip()
+    except Exception:
+        bucket = input("\n> ").strip()
     while not bucket:
         bucket = input("> ").strip()
 
@@ -236,11 +250,9 @@ def get_training_config():
         size = 'm'
     model = f"yolo{gen}{size}.pt"
 
-    # Instance
-    print("\n  Instance: 1=g5.xlarge 2=g5.2xlarge 3=g4dn.xlarge")
-    inst_choice = input("  [1]: ").strip() or "1"
-    instances = {'1': 'g5.xlarge', '2': 'g5.2xlarge', '3': 'g4dn.xlarge'}
-    instance_type = instances.get(inst_choice, 'g5.xlarge')
+    # Instance - show common options but accept any
+    print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge, p3.2xlarge):")
+    instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
 
     epochs = int(input("\n  Epochs [120]: ").strip() or "120")
     batch = int(input("  Batch [16]: ").strip() or "16")
