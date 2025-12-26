@@ -303,7 +303,7 @@ def merge_datasets(dataset_paths, job_id):
 
 
 def upload_to_s3(job_dir, bucket, job_id):
-    """Upload job to S3."""
+    """Upload job to S3 (including train.py)."""
     s3 = boto3.client('s3')
 
     print(f"\nUploading to s3://{bucket}/jobs/{job_id}/")
@@ -314,6 +314,12 @@ def upload_to_s3(job_dir, bucket, job_id):
             key = f"jobs/{job_id}/{path.relative_to(job_dir)}"
             s3.upload_file(str(path), bucket, key)
             count += 1
+
+    # Upload train.py with job (self-contained)
+    train_py = Path(__file__).parent / 'train.py'
+    if train_py.exists():
+        s3.upload_file(str(train_py), bucket, f"jobs/{job_id}/train.py")
+        count += 1
 
     print(f"  Uploaded {count} files")
 
@@ -347,7 +353,7 @@ mount -t efs {infra['efs_id']}:/ /mnt/efs
 pip install ultralytics boto3 pyyaml requests
 
 # Download and run trainer
-aws s3 cp s3://{bucket}/trainer/train.py /home/ubuntu/train.py
+aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py
 cd /home/ubuntu
 python train.py
 """
