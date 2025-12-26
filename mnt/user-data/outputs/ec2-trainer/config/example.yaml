@@ -1,0 +1,50 @@
+# Training Configuration
+# Copy this to your job folder as config.yaml
+
+# Model
+model: yolo12m.pt           # Base model to train
+instance_type: g5.xlarge    # EC2 instance type
+
+# Training
+epochs: 120                 # Total epochs
+batch: 16                   # Batch size
+imgsz: 640                  # Image size
+patience: 20                # Early stopping patience
+
+# Optimizer
+optimizer: AdamW
+lr0: 0.001                  # Initial learning rate
+warmup_epochs: 5            # Warmup epochs
+
+# Regularization
+dropout: 0.1
+
+# Loss weights
+box: 0.5                    # Box loss weight
+cls: 3.0                    # Classification loss weight
+dfl: 0.5                    # DFL loss weight
+
+# Validation
+conf: 0.01                  # Confidence threshold
+iou: 0.45                   # IoU threshold
+
+# Augmentation
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 15
+translate: 0.1
+scale: 0.5
+mosaic: 1.0
+mixup: 0.15
+copy_paste: 0.3
+
+# Data loading
+workers: 8
+close_mosaic: 10
+
+# Checkpointing
+save_period: 10             # Save checkpoint every N epochs
+
+# Safety
+stall_hours: 2              # Kill if stuck for this many hours
