@@ -5,8 +5,7 @@ Train YOLO models on AWS spot instances. Upload a job, get trained weights.
 ## Usage
 
 ```bash
-python prep.py    # datasets → config → upload → start training
-python pull.py    # check status, pull weights
+./run.sh    # menu: start job or check status
 ```
 
 ## Flow
@@ -27,6 +26,7 @@ prep.py will ask for AWS infrastructure config (saved to `~/.ec2-trainer.yaml`):
 ## Files
 
 ```
+run.sh      - Entry point (menu)
 prep.py     - Upload datasets, start training
 pull.py     - Check status, sync weights
 train.py    - Runs on EC2 (bundled with each job)
