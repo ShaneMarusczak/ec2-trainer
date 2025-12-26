@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
 """
-Dataset prep script for EC2 training pipeline.
+Dataset prep wizard for EC2 training pipeline.
 
-Two modes:
-1. PREP MODE: Takes raw images + labels, splits train/val, creates structure
-2. MERGE MODE: Combines multiple YOLO datasets (e.g., from Roboflow exports)
+Interactive walkthrough for preparing and uploading training jobs.
 
 Usage:
-    # Prep raw images + labels
-    python prep.py ./my_images --classes chicken,egg --job-id chicken-v1
-
-    # Merge multiple Roboflow exports
-    python prep.py merge ./dataset1 ./dataset2 ./dataset3 --job-id combined-v1
-
-    # Upload after prep/merge
-    python prep.py ... --upload --bucket my-bucket
+    python prep.py
 """
 
-import argparse
 import random
 import shutil
 import hashlib
@@ -25,7 +15,31 @@ import sys
 import yaml
 import boto3
 from pathlib import Path
-from collections import Counter
+
+
+def main():
+    """Launch the interactive wizard."""
+    print("=" * 60)
+    print("  EC2 YOLO Training - Job Setup Wizard")
+    print("=" * 60)
+
+    # Step 1: Mode selection
+    print("\n[1/6] What do you want to do?\n")
+    print("  1. Prep raw images + labels (need to split train/val)")
+    print("  2. Merge multiple datasets (already have train/val splits)")
+    print("  3. Upload existing YOLO dataset (already structured)")
+    print()
+
+    mode = input("Choose [1/2/3]: ").strip()
+    while mode not in ['1', '2', '3']:
+        mode = input("Please enter 1, 2, or 3: ").strip()
+
+    if mode == '1':
+        interactive_prep()
+    elif mode == '2':
+        interactive_merge()
+    else:
+        interactive_upload_existing()
 
 
 def find_image_label_pairs(input_dir):
@@ -39,8 +53,6 @@ def find_image_label_pairs(input_dir):
             label_path = img_path.with_suffix('.txt')
             if label_path.exists():
                 pairs.append((img_path, label_path))
-            else:
-                print(f"  Skipping {img_path.name} (no label file)")
 
     return pairs
 
@@ -58,27 +70,18 @@ def validate_labels(pairs, num_classes):
                 continue
             class_id = int(parts[0])
             if class_id < 0 or class_id >= num_classes:
-                errors.append(f"{label_path.name}:{line_num} - class {class_id} out of range (0-{num_classes-1})")
+                errors.append(f"{label_path.name}:{line_num} - class {class_id} out of range")
 
     return errors
 
 
-def prep_dataset(input_dir, classes, job_id, val_split=0.2, output_dir='./jobs', seed=42):
-    """Prepare dataset for training pipeline."""
+def prep_dataset(input_dir, classes, job_id, val_split=0.2, seed=42):
+    """Prepare dataset from raw images + labels."""
     random.seed(seed)
 
-    print(f"Preparing dataset: {job_id}")
-    print(f"  Classes: {classes}")
-    print(f"  Validation split: {val_split:.0%}")
-
-    # Find pairs
     pairs = find_image_label_pairs(input_dir)
-    if not pairs:
-        raise ValueError(f"No image/label pairs found in {input_dir}")
 
-    print(f"  Found {len(pairs)} image/label pairs")
-
-    # Validate labels
+    # Validate
     errors = validate_labels(pairs, len(classes))
     if errors:
         print("\nLabel errors found:")
@@ -94,10 +97,8 @@ def prep_dataset(input_dir, classes, job_id, val_split=0.2, output_dir='./jobs',
     train_pairs = pairs[:split_idx]
     val_pairs = pairs[split_idx:]
 
-    print(f"  Train: {len(train_pairs)}, Valid: {len(val_pairs)}")
-
     # Create output structure
-    job_dir = Path(output_dir) / job_id
+    job_dir = Path('./jobs') / job_id
     dataset_dir = job_dir / 'dataset'
 
     for split, split_pairs in [('train', train_pairs), ('valid', val_pairs)]:
@@ -121,23 +122,8 @@ def prep_dataset(input_dir, classes, job_id, val_split=0.2, output_dir='./jobs',
     with open(dataset_dir / 'data.yaml', 'w') as f:
         yaml.dump(data_yaml, f, default_flow_style=False)
 
-    # Create config.yaml with sensible defaults
-    config = {
-        'model': 'yolo12m.pt',
-        'instance_type': 'g5.xlarge',
-        'epochs': 120,
-        'batch': 16,
-        'imgsz': 640,
-        'patience': 20,
-    }
-    with open(job_dir / 'config.yaml', 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-
-    print(f"\nCreated job at: {job_dir}")
-    print(f"  {job_dir}/config.yaml")
-    print(f"  {job_dir}/dataset/data.yaml")
-    print(f"  {job_dir}/dataset/train/  ({len(train_pairs)} images)")
-    print(f"  {job_dir}/dataset/valid/  ({len(val_pairs)} images)")
+    print(f"\n  Created: {job_dir}")
+    print(f"  Train: {len(train_pairs)}, Valid: {len(val_pairs)}")
 
     return job_dir
 
@@ -147,20 +133,14 @@ def hash_image(img_path):
     return hashlib.md5(Path(img_path).read_bytes()).hexdigest()
 
 
-def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
-    """
-    Merge multiple YOLO-format datasets (e.g., Roboflow exports).
-
-    - Unifies class names across datasets
-    - Deduplicates images by content hash
-    - Remaps class IDs to unified scheme
-    """
+def merge_datasets(dataset_dirs, job_id, seed=42):
+    """Merge multiple YOLO-format datasets."""
     random.seed(seed)
 
-    print(f"Merging {len(dataset_dirs)} datasets into: {job_id}")
+    print(f"\nMerging {len(dataset_dirs)} datasets...")
 
     # First pass: collect all class names
-    all_classes = {}  # class_name -> count
+    all_classes = {}
     dataset_configs = []
 
     for ds_path in dataset_dirs:
@@ -168,7 +148,6 @@ def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
         data_yaml = ds_path / 'data.yaml'
 
         if not data_yaml.exists():
-            # Try subdirectory (some exports have extra nesting)
             for f in ds_path.rglob('data.yaml'):
                 data_yaml = f
                 ds_path = f.parent
@@ -185,7 +164,7 @@ def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
         if isinstance(classes, dict):
             classes = list(classes.values())
 
-        print(f"  {ds_path.name}: {len(classes)} classes - {classes}")
+        print(f"  {ds_path.name}: {classes}")
 
         for cls in classes:
             all_classes[cls] = all_classes.get(cls, 0) + 1
@@ -193,18 +172,16 @@ def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
         dataset_configs.append({
             'path': ds_path,
             'classes': classes,
-            'config': config,
         })
 
     if not dataset_configs:
         raise ValueError("No valid datasets found")
 
-    # Create unified class list (sorted for consistency)
     unified_classes = sorted(all_classes.keys())
-    print(f"\nUnified classes ({len(unified_classes)}): {unified_classes}")
+    print(f"\n  Unified: {unified_classes}")
 
     # Create output structure
-    job_dir = Path(output_dir) / job_id
+    job_dir = Path('./jobs') / job_id
     dataset_dir = job_dir / 'dataset'
 
     for split in ['train', 'valid']:
@@ -213,18 +190,16 @@ def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
 
     # Second pass: copy and remap
     image_hashes = {}
-    stats = {'images': 0, 'duplicates': 0, 'annotations': 0}
+    stats = {'images': 0, 'duplicates': 0}
 
     for ds_info in dataset_configs:
         ds_path = ds_info['path']
         ds_classes = ds_info['classes']
 
-        # Build class ID remap: old_id -> new_id
         class_remap = {}
         for old_id, cls_name in enumerate(ds_classes):
             class_remap[old_id] = unified_classes.index(cls_name)
 
-        # Process train and valid splits
         for split in ['train', 'valid']:
             img_dir = ds_path / split / 'images'
             lbl_dir = ds_path / split / 'labels'
@@ -236,13 +211,11 @@ def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
                 if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png', '.webp']:
                     continue
 
-                # Check for duplicate
                 img_hash = hash_image(img_path)
                 if img_hash in image_hashes:
                     stats['duplicates'] += 1
                     continue
 
-                # Find label file
                 lbl_path = lbl_dir / f"{img_path.stem}.txt"
                 if not lbl_path.exists():
                     continue
@@ -258,12 +231,10 @@ def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
                     if new_class_id is not None:
                         parts[0] = str(new_class_id)
                         new_lines.append(' '.join(parts))
-                        stats['annotations'] += 1
 
                 if not new_lines:
                     continue
 
-                # Copy with prefixed name to avoid collisions
                 prefix = ds_path.name.replace('/', '_').replace(' ', '_')
                 new_img_name = f"{prefix}_{img_path.name}"
                 new_lbl_name = f"{prefix}_{img_path.stem}.txt"
@@ -285,27 +256,11 @@ def merge_datasets(dataset_dirs, job_id, output_dir='./jobs', seed=42):
     with open(dataset_dir / 'data.yaml', 'w') as f:
         yaml.dump(data_yaml, f, default_flow_style=False)
 
-    # Create config.yaml
-    config = {
-        'model': 'yolo12m.pt',
-        'instance_type': 'g5.xlarge',
-        'epochs': 120,
-        'batch': 16,
-        'imgsz': 640,
-        'patience': 20,
-    }
-    with open(job_dir / 'config.yaml', 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-
-    # Count per split
     train_count = len(list((dataset_dir / 'train' / 'images').iterdir()))
     valid_count = len(list((dataset_dir / 'valid' / 'images').iterdir()))
 
-    print(f"\nMerge complete:")
-    print(f"  Total images: {stats['images']} (removed {stats['duplicates']} duplicates)")
-    print(f"  Total annotations: {stats['annotations']}")
+    print(f"\n  Images: {stats['images']} (removed {stats['duplicates']} duplicates)")
     print(f"  Train: {train_count}, Valid: {valid_count}")
-    print(f"  Output: {job_dir}")
 
     return job_dir
 
@@ -327,132 +282,86 @@ def upload_to_s3(job_dir, bucket):
             file_count += 1
 
     print(f"  Uploaded {file_count} files")
-    print(f"\nTo start training, the Lambda will trigger automatically.")
-    print(f"Or manually re-upload config.yaml to trigger:")
-    print(f"  aws s3 cp {job_dir}/config.yaml s3://{bucket}/jobs/{job_id}/config.yaml")
-
-
-def interactive_mode():
-    """Interactive TUI walkthrough for creating a training job."""
-    print("=" * 60)
-    print("  EC2 YOLO Training - Job Setup Wizard")
-    print("=" * 60)
-
-    # Step 1: Mode selection
-    print("\n[1/6] What do you want to do?\n")
-    print("  1. Prep raw images + labels (need to split train/val)")
-    print("  2. Merge multiple datasets (already have train/val splits)")
-    print("  3. Upload existing YOLO dataset (already structured)")
-    print()
-
-    mode = input("Choose [1/2/3]: ").strip()
-    while mode not in ['1', '2', '3']:
-        mode = input("Please enter 1, 2, or 3: ").strip()
-
-    if mode == '1':
-        return interactive_prep()
-    elif mode == '2':
-        return interactive_merge()
-    else:
-        return interactive_upload_existing()
+    print(f"\nTraining will start automatically!")
 
 
 def interactive_prep():
     """Interactive prep mode."""
     print("\n[2/6] Where are your images + labels?\n")
     print("  Expected: folder with image.jpg + image.txt pairs")
-    print()
 
-    input_dir = input("Path to folder: ").strip()
-    input_dir = Path(input_dir).expanduser()
+    input_dir = Path(input("\nPath: ").strip()).expanduser()
 
     while not input_dir.exists():
-        print(f"  Directory not found: {input_dir}")
-        input_dir = Path(input("Path to folder: ").strip()).expanduser()
+        print(f"  Not found: {input_dir}")
+        input_dir = Path(input("Path: ").strip()).expanduser()
 
-    # Count pairs
     pairs = find_image_label_pairs(input_dir)
     print(f"\n  Found {len(pairs)} image/label pairs")
 
     if not pairs:
-        print("  No valid pairs found. Check that .txt labels exist.")
-        return None
+        print("  No valid pairs found!")
+        return
 
     # Classes
-    print("\n[3/6] What classes are in your labels?\n")
-    print("  Enter comma-separated class names in order (class 0, class 1, ...)")
+    print("\n[3/6] Class names (in order: class 0, class 1, ...)\n")
     print("  Example: chicken,egg")
-    print()
 
-    classes_str = input("Classes: ").strip()
+    classes_str = input("\nClasses: ").strip()
     classes = [c.strip() for c in classes_str.split(',')]
-    print(f"\n  Classes: {classes}")
+    print(f"  {classes}")
 
     # Job ID
-    print("\n[4/6] Give this job a unique ID\n")
+    print("\n[4/6] Job ID\n")
     print("  Example: chicken-detector-v1")
-    print()
 
-    job_id = input("Job ID: ").strip()
+    job_id = input("\nJob ID: ").strip()
     while not job_id or ' ' in job_id:
-        print("  Job ID cannot be empty or contain spaces")
         job_id = input("Job ID: ").strip()
 
     # Val split
-    print("\n[5/6] Train/validation split\n")
-    val_split = input("Validation ratio [0.2]: ").strip() or "0.2"
+    print("\n[5/6] Validation split")
+    val_split = input("\nRatio [0.2]: ").strip() or "0.2"
     val_split = float(val_split)
 
-    # Training config
-    config = interactive_training_config()
+    # Config
+    config = get_training_config()
 
-    # Confirm
+    # Summary
     print("\n" + "=" * 60)
     print("  Summary")
     print("=" * 60)
-    print(f"  Input:      {input_dir}")
-    print(f"  Pairs:      {len(pairs)}")
-    print(f"  Classes:    {classes}")
-    print(f"  Job ID:     {job_id}")
-    print(f"  Val split:  {val_split:.0%}")
-    print(f"  Model:      {config['model']}")
-    print(f"  Instance:   {config['instance_type']}")
-    print(f"  Epochs:     {config['epochs']}")
-    print()
+    print(f"  Input:    {input_dir} ({len(pairs)} pairs)")
+    print(f"  Classes:  {classes}")
+    print(f"  Job ID:   {job_id}")
+    print(f"  Split:    {1-val_split:.0%} train / {val_split:.0%} val")
+    print(f"  Model:    {config['model']}")
+    print(f"  Instance: {config['instance_type']}")
+    print(f"  Epochs:   {config['epochs']}")
 
-    confirm = input("Proceed? [Y/n]: ").strip().lower()
-    if confirm and confirm != 'y':
+    if input("\nProceed? [Y/n]: ").strip().lower() not in ['', 'y']:
         print("Cancelled.")
-        return None
+        return
 
-    # Run prep
-    job_dir = prep_dataset(
-        input_dir=str(input_dir),
-        classes=classes,
-        job_id=job_id,
-        val_split=val_split,
-    )
+    job_dir = prep_dataset(str(input_dir), classes, job_id, val_split)
 
-    # Update config
     with open(job_dir / 'config.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
 
-    return interactive_upload_prompt(job_dir)
+    upload_prompt(job_dir)
 
 
 def interactive_merge():
     """Interactive merge mode."""
-    print("\n[2/6] Enter dataset directories to merge\n")
+    print("\n[2/6] Dataset directories to merge\n")
     print("  Enter paths one per line, empty line when done")
-    print("  Example: ./dataset1")
-    print()
 
     datasets = []
     while True:
-        path = input(f"Dataset {len(datasets) + 1} (or Enter to finish): ").strip()
+        path = input(f"\nDataset {len(datasets) + 1} (Enter to finish): ").strip()
         if not path:
             if len(datasets) < 2:
-                print("  Need at least 2 datasets to merge")
+                print("  Need at least 2 datasets")
                 continue
             break
 
@@ -461,145 +370,117 @@ def interactive_merge():
             print(f"  Not found: {path}")
             continue
 
-        # Check for data.yaml
-        if not (path / 'data.yaml').exists():
-            found = list(path.rglob('data.yaml'))
-            if not found:
-                print(f"  No data.yaml found in {path}")
-                continue
+        has_data_yaml = (path / 'data.yaml').exists() or list(path.rglob('data.yaml'))
+        if not has_data_yaml:
+            print(f"  No data.yaml in {path}")
+            continue
 
         datasets.append(str(path))
-        print(f"  Added: {path}")
-
-    print(f"\n  Merging {len(datasets)} datasets")
+        print(f"  Added: {path.name}")
 
     # Job ID
-    print("\n[3/6] Give this job a unique ID\n")
-    job_id = input("Job ID: ").strip()
+    print("\n[3/6] Job ID")
+    job_id = input("\nJob ID: ").strip()
     while not job_id or ' ' in job_id:
-        print("  Job ID cannot be empty or contain spaces")
         job_id = input("Job ID: ").strip()
 
-    # Training config
-    config = interactive_training_config()
+    # Config
+    config = get_training_config()
 
-    # Confirm
+    # Summary
     print("\n" + "=" * 60)
     print("  Summary")
     print("=" * 60)
-    print(f"  Datasets:   {len(datasets)}")
+    print(f"  Datasets: {len(datasets)}")
     for ds in datasets:
-        print(f"              - {ds}")
-    print(f"  Job ID:     {job_id}")
-    print(f"  Model:      {config['model']}")
-    print(f"  Instance:   {config['instance_type']}")
-    print(f"  Epochs:     {config['epochs']}")
-    print()
+        print(f"            - {Path(ds).name}")
+    print(f"  Job ID:   {job_id}")
+    print(f"  Model:    {config['model']}")
+    print(f"  Instance: {config['instance_type']}")
 
-    confirm = input("Proceed? [Y/n]: ").strip().lower()
-    if confirm and confirm != 'y':
+    if input("\nProceed? [Y/n]: ").strip().lower() not in ['', 'y']:
         print("Cancelled.")
-        return None
+        return
 
-    # Run merge
-    job_dir = merge_datasets(
-        dataset_dirs=datasets,
-        job_id=job_id,
-    )
+    job_dir = merge_datasets(datasets, job_id)
 
-    # Update config
     with open(job_dir / 'config.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
 
-    return interactive_upload_prompt(job_dir)
+    upload_prompt(job_dir)
 
 
 def interactive_upload_existing():
-    """Upload an already-structured YOLO dataset."""
-    print("\n[2/6] Where is your dataset?\n")
-    print("  Expected structure:")
-    print("    dataset/")
-    print("      data.yaml")
-    print("      train/images/, train/labels/")
-    print("      valid/images/, valid/labels/")
-    print()
+    """Upload existing YOLO dataset."""
+    print("\n[2/6] Dataset location\n")
+    print("  Expected: folder with data.yaml, train/, valid/")
 
-    dataset_dir = Path(input("Path to dataset: ").strip()).expanduser()
+    dataset_dir = Path(input("\nPath: ").strip()).expanduser()
 
     while not (dataset_dir / 'data.yaml').exists():
-        print(f"  No data.yaml found in {dataset_dir}")
-        dataset_dir = Path(input("Path to dataset: ").strip()).expanduser()
+        found = list(dataset_dir.rglob('data.yaml'))
+        if found:
+            dataset_dir = found[0].parent
+            print(f"  Found data.yaml in: {dataset_dir}")
+            break
+        print(f"  No data.yaml in {dataset_dir}")
+        dataset_dir = Path(input("Path: ").strip()).expanduser()
 
     # Job ID
-    print("\n[3/6] Give this job a unique ID\n")
-    job_id = input("Job ID: ").strip()
+    print("\n[3/6] Job ID")
+    job_id = input("\nJob ID: ").strip()
     while not job_id or ' ' in job_id:
         job_id = input("Job ID: ").strip()
 
-    # Training config
-    config = interactive_training_config()
+    # Config
+    config = get_training_config()
 
-    # Create job structure
+    # Create job
     job_dir = Path('./jobs') / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy dataset
-    dest_dataset = job_dir / 'dataset'
-    if dest_dataset.exists():
-        shutil.rmtree(dest_dataset)
-    shutil.copytree(dataset_dir, dest_dataset)
+    dest = job_dir / 'dataset'
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(dataset_dir, dest)
 
-    # Write config
     with open(job_dir / 'config.yaml', 'w') as f:
         yaml.dump(config, f, default_flow_style=False)
 
-    print(f"\n  Created job at: {job_dir}")
+    print(f"\n  Created: {job_dir}")
 
-    return interactive_upload_prompt(job_dir)
+    upload_prompt(job_dir)
 
 
-def interactive_training_config():
-    """Interactive training configuration."""
-    print("\n[5/6] Training configuration\n")
+def get_training_config():
+    """Get training configuration interactively."""
+    print("\n[5/6] Training config\n")
 
-    # Model
-    print("  Available models:")
-    print("    1. yolo12n.pt  (nano - fastest, least accurate)")
+    print("  Models:")
+    print("    1. yolo12n.pt  (nano)")
     print("    2. yolo12s.pt  (small)")
-    print("    3. yolo12m.pt  (medium - recommended)")
+    print("    3. yolo12m.pt  (medium) *")
     print("    4. yolo12l.pt  (large)")
-    print("    5. yolo12x.pt  (xlarge - slowest, most accurate)")
-    print()
+    print("    5. yolo12x.pt  (xlarge)")
 
-    model_choice = input("Model [3]: ").strip() or "3"
-    models = {
-        '1': 'yolo12n.pt', '2': 'yolo12s.pt', '3': 'yolo12m.pt',
-        '4': 'yolo12l.pt', '5': 'yolo12x.pt'
-    }
+    model_choice = input("\nModel [3]: ").strip() or "3"
+    models = {'1': 'yolo12n.pt', '2': 'yolo12s.pt', '3': 'yolo12m.pt',
+              '4': 'yolo12l.pt', '5': 'yolo12x.pt'}
     model = models.get(model_choice, 'yolo12m.pt')
 
-    # Instance type
-    print("\n  Instance types (GPU):")
-    print("    1. g5.xlarge   (~$1.00/hr - 1x A10G, 24GB)")
-    print("    2. g5.2xlarge  (~$1.50/hr - 1x A10G, 24GB, more CPU)")
-    print("    3. g4dn.xlarge (~$0.50/hr - 1x T4, 16GB)")
-    print()
+    print("\n  Instances:")
+    print("    1. g5.xlarge   ($1/hr, A10G 24GB) *")
+    print("    2. g5.2xlarge  ($1.50/hr, A10G)")
+    print("    3. g4dn.xlarge ($0.50/hr, T4 16GB)")
 
-    instance_choice = input("Instance [1]: ").strip() or "1"
-    instances = {
-        '1': 'g5.xlarge', '2': 'g5.2xlarge', '3': 'g4dn.xlarge'
-    }
-    instance_type = instances.get(instance_choice, 'g5.xlarge')
+    inst_choice = input("\nInstance [1]: ").strip() or "1"
+    instances = {'1': 'g5.xlarge', '2': 'g5.2xlarge', '3': 'g4dn.xlarge'}
+    instance_type = instances.get(inst_choice, 'g5.xlarge')
 
-    # Epochs
-    epochs = input("\nEpochs [120]: ").strip() or "120"
-    epochs = int(epochs)
+    epochs = int(input("\nEpochs [120]: ").strip() or "120")
+    batch = int(input("Batch size [16]: ").strip() or "16")
 
-    # Batch size
-    batch = input("Batch size [16]: ").strip() or "16"
-    batch = int(batch)
-
-    config = {
+    return {
         'model': model,
         'instance_type': instance_type,
         'epochs': epochs,
@@ -608,125 +489,25 @@ def interactive_training_config():
         'patience': 20,
     }
 
-    return config
 
-
-def interactive_upload_prompt(job_dir):
-    """Prompt to upload to S3."""
+def upload_prompt(job_dir):
+    """Prompt for S3 upload."""
     print("\n[6/6] Upload to S3?\n")
 
-    upload = input("Upload now? [y/N]: ").strip().lower()
-    if upload != 'y':
+    if input("Upload now? [y/N]: ").strip().lower() != 'y':
         print(f"\nJob ready at: {job_dir}")
-        print(f"\nTo upload later:")
-        print(f"  python prep.py upload {job_dir} --bucket YOUR_BUCKET")
-        return job_dir
+        return
 
-    bucket = input("S3 bucket name: ").strip()
+    bucket = input("\nS3 bucket: ").strip()
     while not bucket:
-        bucket = input("S3 bucket name: ").strip()
+        bucket = input("S3 bucket: ").strip()
 
     upload_to_s3(job_dir, bucket)
-    return job_dir
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description='Prepare dataset for EC2 training pipeline',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    # Interactive wizard (recommended)
-    python prep.py
-
-    # Prep raw images + labels
-    python prep.py ./chicken_photos --classes chicken --job-id chicken-v1
-
-    # Merge multiple Roboflow exports
-    python prep.py merge ./dataset1 ./dataset2 --job-id combined-v1
-
-    # Upload existing job
-    python prep.py upload ./jobs/my-job --bucket my-bucket
-        """
-    )
-
-    subparsers = parser.add_subparsers(dest='command')
-
-    # Merge subcommand
-    merge_parser = subparsers.add_parser('merge', help='Merge multiple YOLO datasets')
-    merge_parser.add_argument('datasets', nargs='+', help='Dataset directories to merge')
-    merge_parser.add_argument('--job-id', required=True, help='Unique job identifier')
-    merge_parser.add_argument('--output-dir', default='./jobs', help='Output directory')
-    merge_parser.add_argument('--upload', action='store_true', help='Upload to S3 after merge')
-    merge_parser.add_argument('--bucket', help='S3 bucket name')
-    merge_parser.add_argument('--seed', type=int, default=42, help='Random seed')
-
-    # Upload subcommand
-    upload_parser = subparsers.add_parser('upload', help='Upload a prepared job to S3')
-    upload_parser.add_argument('job_dir', help='Job directory to upload')
-    upload_parser.add_argument('--bucket', required=True, help='S3 bucket name')
-
-    # Default: prep mode (for backwards compatibility, input_dir is positional)
-    parser.add_argument('input_dir', nargs='?', help='Directory with images + YOLO labels')
-    parser.add_argument('--classes', help='Comma-separated class names')
-    parser.add_argument('--job-id', help='Unique job identifier')
-    parser.add_argument('--val-split', type=float, default=0.2, help='Validation split (default: 0.2)')
-    parser.add_argument('--output-dir', default='./jobs', help='Output directory')
-    parser.add_argument('--upload', action='store_true', help='Upload to S3')
-    parser.add_argument('--bucket', help='S3 bucket name')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-
-    args = parser.parse_args()
-
-    # No args = interactive mode
-    if len(sys.argv) == 1:
-        interactive_mode()
-        return
-
-    if args.command == 'upload':
-        upload_to_s3(args.job_dir, args.bucket)
-        return
-
-    if args.command == 'merge':
-        if args.upload and not args.bucket:
-            parser.error("--bucket is required when using --upload")
-        job_dir = merge_datasets(
-            dataset_dirs=args.datasets,
-            job_id=args.job_id,
-            output_dir=args.output_dir,
-            seed=args.seed,
-        )
-        if args.upload:
-            upload_to_s3(job_dir, args.bucket)
-        return
-
-    # Prep mode
-    if args.upload and not args.bucket:
-        parser.error("--bucket is required when using --upload")
-
-    if not args.input_dir:
-        # No input_dir and not a subcommand = interactive
-        interactive_mode()
-        return
-
-    if not args.classes:
-        parser.error("--classes is required")
-    if not args.job_id:
-        parser.error("--job-id is required")
-
-    classes = [c.strip() for c in args.classes.split(',')]
-    job_dir = prep_dataset(
-        input_dir=args.input_dir,
-        classes=classes,
-        job_id=args.job_id,
-        val_split=args.val_split,
-        output_dir=args.output_dir,
-        seed=args.seed,
-    )
-
-    if args.upload:
-        upload_to_s3(job_dir, args.bucket)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nCancelled.")
+        sys.exit(0)
