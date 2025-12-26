@@ -9,12 +9,14 @@ Usage:
 import base64
 import shutil
 import hashlib
+import subprocess
 import sys
 import yaml
 import boto3
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / '.ec2-trainer.yaml'
+DATASETS_DIR = Path('./datasets')
 
 
 def main():
@@ -26,23 +28,32 @@ def main():
     infra = load_infra_config()
 
     # Collect datasets
-    print("\nDatasets to upload (Enter when done):\n")
+    print("\nDatasets to upload (Enter when done):")
+    print("  - Local path: ~/datasets/my-dataset")
+    print("  - Roboflow:   rf:workspace/project/version")
+    print()
 
     datasets = []
     while True:
         prompt = f"Dataset {len(datasets) + 1}: " if datasets else "Dataset: "
-        path = input(prompt).strip()
+        user_input = input(prompt).strip()
 
-        if not path:
+        if not user_input:
             if not datasets:
                 print("  Need at least one dataset")
                 continue
             break
 
-        path = Path(path).expanduser()
-        if not path.exists():
-            print(f"  Not found: {path}")
-            continue
+        # Check if Roboflow
+        if user_input.startswith('rf:'):
+            path = download_roboflow(user_input, infra)
+            if not path:
+                continue
+        else:
+            path = Path(user_input).expanduser()
+            if not path.exists():
+                print(f"  Not found: {path}")
+                continue
 
         # Find data.yaml
         data_yaml = path / 'data.yaml'
@@ -147,6 +158,60 @@ def load_infra_config():
     print(f"\nSaved to {CONFIG_FILE}")
 
     return config
+
+
+def download_roboflow(rf_string, infra):
+    """Download dataset from Roboflow.
+
+    Format: rf:workspace/project/version or rf:workspace/project (defaults to v1)
+    """
+    try:
+        from roboflow import Roboflow
+    except ImportError:
+        print("  Installing roboflow...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'roboflow', '-q'])
+        from roboflow import Roboflow
+
+    # Parse rf:workspace/project/version
+    parts = rf_string[3:].split('/')
+    if len(parts) == 2:
+        workspace, project = parts
+        version = 1
+    elif len(parts) == 3:
+        workspace, project, version = parts
+        version = int(version)
+    else:
+        print("  Invalid format. Use rf:workspace/project or rf:workspace/project/version")
+        return None
+
+    # Get API key
+    api_key = infra.get('roboflow_api_key')
+    if not api_key:
+        print("\n  Roboflow API key (from roboflow.com/settings):")
+        api_key = input("  > ").strip()
+        if not api_key:
+            print("  Cancelled.")
+            return None
+        # Save for next time
+        infra['roboflow_api_key'] = api_key
+        with open(CONFIG_FILE, 'w') as f:
+            yaml.dump(infra, f)
+
+    # Download
+    print(f"  Downloading {workspace}/{project} v{version}...")
+    try:
+        rf = Roboflow(api_key=api_key)
+        proj = rf.workspace(workspace).project(project)
+        proj.version(version).download(
+            "yolov8",
+            location=str(DATASETS_DIR / f"{workspace}_{project}_v{version}")
+        )
+        path = DATASETS_DIR / f"{workspace}_{project}_v{version}"
+        print(f"  Downloaded to: {path}")
+        return path
+    except Exception as e:
+        print(f"  Failed: {e}")
+        return None
 
 
 def pick_bucket(infra):
