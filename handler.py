@@ -6,20 +6,29 @@ Creates a persistent spot request bound to that specific job.
 """
 
 import boto3
-import json
 import yaml
 import os
+from botocore.exceptions import ClientError
 
 ec2 = boto3.client('ec2')
 s3 = boto3.client('s3')
 
+
+def get_required_env(key):
+    """Get required environment variable or raise clear error."""
+    value = os.environ.get(key)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {key}")
+    return value
+
+
 # Environment variables (set in Lambda config)
-BUCKET = os.environ['BUCKET']
-EFS_ID = os.environ['EFS_ID']
-SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
-SUBNET_ID = os.environ['SUBNET_ID']
-SECURITY_GROUP_ID = os.environ['SECURITY_GROUP_ID']
-IAM_INSTANCE_PROFILE = os.environ['IAM_INSTANCE_PROFILE']
+BUCKET = get_required_env('BUCKET')
+EFS_ID = get_required_env('EFS_ID')
+SNS_TOPIC_ARN = get_required_env('SNS_TOPIC_ARN')
+SUBNET_ID = get_required_env('SUBNET_ID')
+SECURITY_GROUP_ID = get_required_env('SECURITY_GROUP_ID')
+IAM_INSTANCE_PROFILE = get_required_env('IAM_INSTANCE_PROFILE')
 AMI_ID = os.environ.get('AMI_ID', 'ami-0c7217cdde317cfec')  # Deep Learning AMI
 
 
@@ -62,13 +71,20 @@ def handler(event, context):
     return {'statusCode': 200, 'body': f'Spot request created for {job_id}'}
 
 
+def s3_key_exists(key):
+    """Check if a key exists in S3."""
+    try:
+        s3.head_object(Bucket=BUCKET, Key=key)
+        return True
+    except ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return False
+        raise  # Re-raise permission errors, throttling, etc.
+
+
 def job_complete(job_id):
     """Check if weights already exist for this job."""
-    try:
-        s3.head_object(Bucket=BUCKET, Key=f"weights/{job_id}/best.pt")
-        return True
-    except:
-        return False
+    return s3_key_exists(f"weights/{job_id}/best.pt")
 
 
 def spot_exists_for_job(job_id):
@@ -102,7 +118,7 @@ mkdir -p /mnt/efs
 mount -t efs {EFS_ID}:/ /mnt/efs
 
 # Install dependencies
-pip install ultralytics boto3 pyyaml
+pip install ultralytics boto3 pyyaml requests
 
 # Download and run trainer
 aws s3 cp s3://{BUCKET}/trainer/train.py /home/ubuntu/train.py
