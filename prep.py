@@ -136,7 +136,6 @@ def load_infra_config():
 
     config = {
         'efs_id': input("EFS ID (fs-xxxxx): ").strip(),
-        'sns_topic_arn': input("SNS Topic ARN: ").strip(),
         'subnet_id': input("Subnet ID (subnet-xxxxx): ").strip(),
         'security_group_id': input("Security Group ID (sg-xxxxx): ").strip(),
         'iam_instance_profile': input("IAM Instance Profile name: ").strip(),
@@ -385,7 +384,6 @@ def create_spot_request(job_id, instance_type, bucket, infra):
     user_data = f"""#!/bin/bash
 export JOB_ID="{job_id}"
 export S3_BUCKET="{bucket}"
-export SNS_TOPIC_ARN="{infra['sns_topic_arn']}"
 export EFS_ID="{infra['efs_id']}"
 
 # Mount EFS

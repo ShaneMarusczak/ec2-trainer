@@ -35,7 +35,6 @@ def get_required_env(key):
 # Environment variables (set by user data)
 JOB_ID = get_required_env('JOB_ID')
 S3_BUCKET = get_required_env('S3_BUCKET')
-SNS_TOPIC_ARN = get_required_env('SNS_TOPIC_ARN')
 EFS_ID = get_required_env('EFS_ID')
 
 # Paths
@@ -54,7 +53,6 @@ s3_config = Config(
 )
 s3 = boto3.client('s3', config=s3_config)
 ec2 = boto3.client('ec2')
-sns = boto3.client('sns')
 
 # Watchdog state
 watchdog_stop = threading.Event()
@@ -123,20 +121,18 @@ def s3_key_exists(key):
 
 def main():
     """Main entry point."""
-    notify(f"{JOB_ID} started on {get_instance_type()}")
-    
+    print(f"{JOB_ID} started on {get_instance_type()}")
+
     try:
         # Check if already complete (previous instance finished but didn't cancel spot)
         if job_already_complete():
             print(f"Job {JOB_ID} already complete. Cleaning up.")
-            notify(f"{JOB_ID} already complete - cleaning up stale spot")
             cleanup_and_terminate()
             return
-        
+
         # Check if job still exists in S3
         if not job_exists():
             print(f"Job {JOB_ID} no longer exists in S3. Cleaning up.")
-            notify(f"{JOB_ID} deleted - cleaning up")
             cleanup_and_terminate()
             return
         
@@ -173,24 +169,24 @@ def main():
         
         # Upload results
         upload_weights(config, metrics)
-        
-        # Notify success
+
+        # Log completion
         recall = metrics.get('recall', 0)
         mAP50 = metrics.get('mAP50', 0)
-        notify(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50")
-        
+        print(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50")
+
         # Cleanup and terminate
         cleanup_and_terminate()
         
     except NaNDetected as e:
         watchdog_stop.set()
-        notify(f"{JOB_ID} failed: NaN at epoch {e.epoch}")
+        print(f"{JOB_ID} failed: NaN at epoch {e.epoch}")
         cleanup_efs()
         cleanup_and_terminate()
-        
+
     except Exception as e:
         watchdog_stop.set()
-        notify(f"{JOB_ID} failed: {str(e)[:100]}")
+        print(f"{JOB_ID} failed: {str(e)[:100]}")
         cleanup_and_terminate()
 
 
@@ -415,24 +411,11 @@ def watchdog(stall_hours):
             if checkpoint.exists():
                 age_hours = (time.time() - checkpoint.stat().st_mtime) / 3600
                 if age_hours > stall_hours:
-                    notify(f"{JOB_ID} stalled - no checkpoint update in {age_hours:.1f}h")
+                    print(f"{JOB_ID} stalled - no checkpoint update in {age_hours:.1f}h")
                     cleanup_efs()
                     cleanup_and_terminate()
         except Exception as e:
             print(f"Watchdog error: {e}")
-
-
-def notify(message):
-    """Send SNS notification."""
-    try:
-        sns.publish(
-            TopicArn=SNS_TOPIC_ARN,
-            Message=message,
-            Subject=f"Training: {JOB_ID}"
-        )
-        print(f"Notification sent: {message}")
-    except Exception as e:
-        print(f"Failed to send notification: {e}")
 
 
 def cleanup_efs():
