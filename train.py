@@ -19,12 +19,23 @@ import boto3
 import yaml
 from pathlib import Path
 from datetime import datetime
+from functools import wraps
+from botocore.exceptions import ClientError
+from botocore.config import Config
+
+
+def get_required_env(key):
+    """Get required environment variable or raise clear error."""
+    value = os.environ.get(key)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {key}")
+    return value
+
 
 # Environment variables (set by user data)
-JOB_ID = os.environ['JOB_ID']
-S3_BUCKET = os.environ['S3_BUCKET']
-SNS_TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
-EFS_ID = os.environ['EFS_ID']
+JOB_ID = get_required_env('JOB_ID')
+S3_BUCKET = get_required_env('S3_BUCKET')
+EFS_ID = get_required_env('EFS_ID')
 
 # Paths
 EFS_ROOT = Path('/mnt/efs')
@@ -34,31 +45,94 @@ CHECKPOINT_FILE = JOB_DIR / 'last.pt'
 DATASET_DIR = JOB_DIR / 'dataset'
 LOCAL_WEIGHTS_DIR = JOB_DIR / 'weights'
 
-# AWS clients
-s3 = boto3.client('s3')
+# AWS clients with retry config
+s3_config = Config(
+    connect_timeout=30,
+    read_timeout=300,
+    retries={'max_attempts': 3, 'mode': 'adaptive'}
+)
+s3 = boto3.client('s3', config=s3_config)
 ec2 = boto3.client('ec2')
-sns = boto3.client('sns')
 
 # Watchdog state
 watchdog_stop = threading.Event()
 
+# Training defaults (overridden by config.yaml)
+TRAIN_DEFAULTS = {
+    'epochs': 120,
+    'batch': 16,
+    'imgsz': 640,
+    'patience': 20,
+    'optimizer': 'AdamW',
+    'lr0': 0.001,
+    'warmup_epochs': 5,
+    'dropout': 0.1,
+    'box': 0.5,
+    'cls': 3.0,
+    'dfl': 0.5,
+    'conf': 0.01,
+    'iou': 0.45,
+    'hsv_h': 0.015,
+    'hsv_s': 0.7,
+    'hsv_v': 0.4,
+    'degrees': 15,
+    'translate': 0.1,
+    'scale': 0.5,
+    'mosaic': 1.0,
+    'mixup': 0.15,
+    'workers': 8,
+    'close_mosaic': 10,
+    'copy_paste': 0.3,
+    'save_period': 10,
+}
+
+
+def retry_on_transient(max_attempts=3, backoff=2):
+    """Retry decorator for transient S3 errors."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except ClientError as e:
+                    code = e.response['Error']['Code']
+                    if code in ('Throttling', 'RequestTimeout', 'ServiceUnavailable', 'SlowDown'):
+                        last_exception = e
+                        time.sleep(backoff ** attempt)
+                        continue
+                    raise
+            raise last_exception
+        return wrapper
+    return decorator
+
+
+def s3_key_exists(key):
+    """Check if a key exists in S3."""
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=key)
+        return True
+    except ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return False
+        raise
+
 
 def main():
     """Main entry point."""
-    notify(f"{JOB_ID} started on {get_instance_type()}")
-    
+    print(f"{JOB_ID} started on {get_instance_type()}")
+
     try:
         # Check if already complete (previous instance finished but didn't cancel spot)
         if job_already_complete():
             print(f"Job {JOB_ID} already complete. Cleaning up.")
-            notify(f"{JOB_ID} already complete - cleaning up stale spot")
             cleanup_and_terminate()
             return
-        
+
         # Check if job still exists in S3
         if not job_exists():
             print(f"Job {JOB_ID} no longer exists in S3. Cleaning up.")
-            notify(f"{JOB_ID} deleted - cleaning up")
             cleanup_and_terminate()
             return
         
@@ -70,7 +144,10 @@ def main():
         
         # Pull dataset if needed
         pull_dataset_if_needed()
-        
+
+        # Validate dataset structure
+        validate_dataset()
+
         # Get starting epoch
         start_epoch = read_epoch()
         print(f"Starting from epoch {start_epoch}")
@@ -92,24 +169,24 @@ def main():
         
         # Upload results
         upload_weights(config, metrics)
-        
-        # Notify success
+
+        # Log completion
         recall = metrics.get('recall', 0)
         mAP50 = metrics.get('mAP50', 0)
-        notify(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50")
-        
+        print(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50")
+
         # Cleanup and terminate
         cleanup_and_terminate()
         
     except NaNDetected as e:
         watchdog_stop.set()
-        notify(f"{JOB_ID} failed: NaN at epoch {e.epoch}")
+        print(f"{JOB_ID} failed: NaN at epoch {e.epoch}")
         cleanup_efs()
         cleanup_and_terminate()
-        
+
     except Exception as e:
         watchdog_stop.set()
-        notify(f"{JOB_ID} failed: {str(e)[:100]}")
+        print(f"{JOB_ID} failed: {str(e)[:100]}")
         cleanup_and_terminate()
 
 
@@ -121,22 +198,15 @@ class NaNDetected(Exception):
 
 def job_already_complete():
     """Check if weights already exist in S3."""
-    try:
-        s3.head_object(Bucket=S3_BUCKET, Key=f"weights/{JOB_ID}/best.pt")
-        return True
-    except:
-        return False
+    return s3_key_exists(f"weights/{JOB_ID}/best.pt")
 
 
 def job_exists():
     """Check if job still exists in S3."""
-    try:
-        s3.head_object(Bucket=S3_BUCKET, Key=f"jobs/{JOB_ID}/config.yaml")
-        return True
-    except:
-        return False
+    return s3_key_exists(f"jobs/{JOB_ID}/config.yaml")
 
 
+@retry_on_transient()
 def pull_config():
     """Download config.yaml from S3."""
     response = s3.get_object(Bucket=S3_BUCKET, Key=f"jobs/{JOB_ID}/config.yaml")
@@ -145,29 +215,52 @@ def pull_config():
     return config
 
 
+@retry_on_transient()
 def pull_dataset_if_needed():
     """Download dataset from S3 if not already present."""
     if DATASET_DIR.exists() and any(DATASET_DIR.iterdir()):
         print("Dataset already present in EFS")
         return
-    
+
     print("Pulling dataset from S3...")
     DATASET_DIR.mkdir(parents=True, exist_ok=True)
-    
+
     # List and download all dataset files
     paginator = s3.get_paginator('list_objects_v2')
     prefix = f"jobs/{JOB_ID}/dataset/"
-    
+
     for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
         for obj in page.get('Contents', []):
             key = obj['Key']
             relative_path = key[len(prefix):]
+            if not relative_path:  # Skip directory markers
+                continue
             local_path = DATASET_DIR / relative_path
-            
+
             local_path.parent.mkdir(parents=True, exist_ok=True)
             s3.download_file(S3_BUCKET, key, str(local_path))
-    
+
     print(f"Dataset downloaded to {DATASET_DIR}")
+
+
+def validate_dataset():
+    """Validate dataset has required structure."""
+    data_yaml = DATASET_DIR / 'data.yaml'
+    if not data_yaml.exists():
+        raise FileNotFoundError(
+            f"data.yaml not found at {data_yaml}. "
+            "Dataset must have data.yaml in root."
+        )
+
+    with open(data_yaml) as f:
+        data_config = yaml.safe_load(f)
+
+    required = ['names', 'train']
+    missing = [k for k in required if k not in data_config]
+    if missing:
+        raise ValueError(f"data.yaml missing required keys: {missing}")
+
+    print(f"Dataset validated: {len(data_config['names'])} classes")
 
 
 def read_epoch():
@@ -176,119 +269,82 @@ def read_epoch():
         content = EPOCH_FILE.read_text().strip()
         if content == 'complete':
             return -1  # Signal that it's already done
-        return int(content)
+        try:
+            return int(content)
+        except ValueError:
+            return 0  # Corrupted file, start over
     return 0
 
 
 def write_epoch(epoch):
-    """Write current epoch to checkpoint file."""
-    EPOCH_FILE.write_text(str(epoch))
+    """Atomic write to epoch checkpoint file."""
+    tmp_file = EPOCH_FILE.with_suffix('.tmp')
+    tmp_file.write_text(str(epoch))
+    tmp_file.replace(EPOCH_FILE)  # Atomic on POSIX
 
 
 def train(config, start_epoch):
     """Run YOLO training."""
     from ultralytics import YOLO
-    
+
     # Load model
     model_name = config.get('model', 'yolo12m.pt')
-    
+
     if start_epoch > 0 and CHECKPOINT_FILE.exists():
         print(f"Resuming from checkpoint at epoch {start_epoch}")
         model = YOLO(str(CHECKPOINT_FILE))
     else:
         print(f"Starting fresh with {model_name}")
         model = YOLO(model_name)
-    
-    # Find data.yaml
+
+    # data.yaml must be in standard location (validated earlier)
     data_yaml = DATASET_DIR / 'data.yaml'
-    if not data_yaml.exists():
-        # Try to find it
-        for f in DATASET_DIR.rglob('data.yaml'):
-            data_yaml = f
-            break
-    
+
     # Update data.yaml path to be absolute
     with open(data_yaml) as f:
         data_config = yaml.safe_load(f)
     data_config['path'] = str(data_yaml.parent)
     with open(data_yaml, 'w') as f:
         yaml.dump(data_config, f)
-    
+
     # Epoch tracking callback
     def on_train_epoch_end(trainer):
         epoch = trainer.epoch
         write_epoch(epoch)
-        
+
         # Check for NaN
         loss = trainer.loss
         if loss is not None and (math.isnan(loss) or loss > 100):
             raise NaNDetected(epoch)
-    
-    # Add callback
+
     model.add_callback('on_train_epoch_end', on_train_epoch_end)
-    
-    # Training parameters from config
-    epochs = config.get('epochs', 120)
-    
-    train_args = {
+
+    # Build training args: defaults merged with user config
+    train_args = {**TRAIN_DEFAULTS, **config}
+
+    # Override/add computed values
+    train_args.update({
         'data': str(data_yaml),
-        'epochs': epochs,
-        'batch': config.get('batch', 16),
-        'imgsz': config.get('imgsz', 640),
-        'patience': config.get('patience', 20),
         'project': str(LOCAL_WEIGHTS_DIR),
         'name': 'train',
         'exist_ok': True,
-        
-        # Optimizer
-        'optimizer': config.get('optimizer', 'AdamW'),
-        'lr0': config.get('lr0', 0.001),
-        'warmup_epochs': config.get('warmup_epochs', 5),
-        
-        # Regularization
-        'dropout': config.get('dropout', 0.1),
-        
-        # Loss weights
-        'box': config.get('box', 0.5),
-        'cls': config.get('cls', 3.0),
-        'dfl': config.get('dfl', 0.5),
-        
-        # Validation
-        'conf': config.get('conf', 0.01),
-        'iou': config.get('iou', 0.45),
-        
-        # Augmentation
-        'hsv_h': config.get('hsv_h', 0.015),
-        'hsv_s': config.get('hsv_s', 0.7),
-        'hsv_v': config.get('hsv_v', 0.4),
-        'degrees': config.get('degrees', 15),
-        'translate': config.get('translate', 0.1),
-        'scale': config.get('scale', 0.5),
-        'mosaic': config.get('mosaic', 1.0),
-        'mixup': config.get('mixup', 0.15),
-        
-        # Other
-        'workers': config.get('workers', 8),
-        'close_mosaic': config.get('close_mosaic', 10),
-        'copy_paste': config.get('copy_paste', 0.3),
-        'save_period': config.get('save_period', 10),
-    }
-    
+    })
+
     # Resume if needed
     if start_epoch > 0:
         train_args['resume'] = True
-    
+
+    # Remove non-YOLO keys from config
+    non_yolo_keys = ['model', 'instance_type', 'stall_hours']
+    for key in non_yolo_keys:
+        train_args.pop(key, None)
+
     # Train
     results = model.train(**train_args)
-    
+
     # Mark complete
     write_epoch('complete')
-    
-    # Copy best.pt to checkpoint location for upload
-    best_pt = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'best.pt'
-    if best_pt.exists():
-        shutil.copy(best_pt, JOB_DIR / 'best.pt')
-    
+
     # Extract metrics
     metrics = {}
     if hasattr(results, 'results_dict'):
@@ -297,83 +353,69 @@ def train(config, start_epoch):
         metrics['precision'] = rd.get('metrics/precision(B)', 0)
         metrics['mAP50'] = rd.get('metrics/mAP50(B)', 0)
         metrics['mAP50-95'] = rd.get('metrics/mAP50-95(B)', 0)
-    
+
     return metrics
 
 
+@retry_on_transient()
 def upload_weights(config, metrics):
     """Upload trained weights and results to S3."""
-    
-    best_pt = JOB_DIR / 'best.pt'
-    if not best_pt.exists():
-        # Try alternate location
-        best_pt = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'best.pt'
-    
+    # best.pt is always in YOLO's output location
+    best_pt = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'best.pt'
+
     if best_pt.exists():
         s3.upload_file(str(best_pt), S3_BUCKET, f"weights/{JOB_ID}/best.pt")
-        print(f"Uploaded best.pt")
-    
-    # Upload config for reference
-    config_copy = JOB_DIR / 'config.yaml'
-    with open(config_copy, 'w') as f:
-        yaml.dump(config, f)
-    s3.upload_file(str(config_copy), S3_BUCKET, f"weights/{JOB_ID}/config.yaml")
-    
-    # Upload results
+        print("Uploaded best.pt")
+    else:
+        print("WARNING: best.pt not found")
+
+    # Upload config directly (no temp file needed)
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=f"weights/{JOB_ID}/config.yaml",
+        Body=yaml.dump(config)
+    )
+
+    # Upload results directly
     results = {
         'job_id': JOB_ID,
         'completed_at': datetime.now().isoformat(),
         'metrics': metrics,
         'config': config
     }
-    results_file = JOB_DIR / 'results.yaml'
-    with open(results_file, 'w') as f:
-        yaml.dump(results, f)
-    s3.upload_file(str(results_file), S3_BUCKET, f"weights/{JOB_ID}/results.yaml")
-    
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=f"weights/{JOB_ID}/results.yaml",
+        Body=yaml.dump(results)
+    )
+
     print(f"Uploaded results to s3://{S3_BUCKET}/weights/{JOB_ID}/")
 
 
 def watchdog(stall_hours):
-    """Monitor training progress, kill if stuck."""
-    last_epoch = -1
-    last_change = time.time()
-    
+    """Monitor training progress via checkpoint file mtime."""
+    checkpoint = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'last.pt'
+
     while not watchdog_stop.is_set():
         time.sleep(600)  # Check every 10 minutes
-        
+
         if watchdog_stop.is_set():
             break
-        
+
         try:
-            current_epoch = read_epoch()
-            if current_epoch == -1:  # Complete
+            # Check if training marked complete
+            if EPOCH_FILE.exists() and EPOCH_FILE.read_text().strip() == 'complete':
                 break
-                
-            if current_epoch != last_epoch:
-                last_epoch = current_epoch
-                last_change = time.time()
-            else:
-                stuck_hours = (time.time() - last_change) / 3600
-                if stuck_hours > stall_hours:
-                    notify(f"{JOB_ID} stuck at epoch {current_epoch} for {stuck_hours:.1f}h - terminating")
+
+            # Check checkpoint staleness
+            if checkpoint.exists():
+                age_hours = (time.time() - checkpoint.stat().st_mtime) / 3600
+                if age_hours > stall_hours:
+                    print(f"{JOB_ID} stalled - no checkpoint update in {age_hours:.1f}h")
                     cleanup_efs()
                     cleanup_and_terminate()
         except Exception as e:
             print(f"Watchdog error: {e}")
-
-
-def notify(message):
-    """Send SNS notification."""
-    try:
-        sns.publish(
-            TopicArn=SNS_TOPIC_ARN,
-            Message=message,
-            Subject=f"Training: {JOB_ID}"
-        )
-        print(f"Notification sent: {message}")
-    except Exception as e:
-        print(f"Failed to send notification: {e}")
 
 
 def cleanup_efs():
@@ -427,7 +469,7 @@ def get_instance_type():
             'http://169.254.169.254/latest/meta-data/instance-type',
             timeout=2
         ).text
-    except:
+    except requests.RequestException:
         return "unknown"
 
 
