@@ -150,7 +150,7 @@ def load_infra_config():
         'subnet_id': input("Subnet ID (subnet-xxxxx): ").strip(),
         'security_group_id': input("Security Group ID (sg-xxxxx): ").strip(),
         'iam_instance_profile': input("IAM Instance Profile name: ").strip(),
-        'ami_id': input("AMI ID [ami-0c7217cdde317cfec]: ").strip() or 'ami-0c7217cdde317cfec',
+        'ami_id': input("AMI ID [ami-0a0c8eebcdd6dcbd0]: ").strip() or 'ami-0a0c8eebcdd6dcbd0',
     }
 
     with open(CONFIG_FILE, 'w') as f:
@@ -455,7 +455,8 @@ export EFS_ID="{infra['efs_id']}"
 mkdir -p /mnt/efs
 mount -t efs {infra['efs_id']}:/ /mnt/efs
 
-# Install dependencies
+# Activate PyTorch env and install deps
+source /opt/conda/bin/activate pytorch
 pip install ultralytics boto3 pyyaml requests
 
 # Download and run trainer
