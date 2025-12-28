@@ -36,6 +36,21 @@ def get_required_env(key):
 JOB_ID = get_required_env('JOB_ID')
 S3_BUCKET = get_required_env('S3_BUCKET')
 EFS_ID = get_required_env('EFS_ID')
+NTFY_TOPIC = os.environ.get('NTFY_TOPIC', '')
+
+
+def ntfy(message):
+    """Send notification via ntfy.sh (if configured)."""
+    if not NTFY_TOPIC:
+        return
+    try:
+        requests.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode('utf-8'),
+            timeout=5
+        )
+    except Exception:
+        pass  # Don't fail training on notification errors
 
 # Paths
 EFS_ROOT = Path('/mnt/efs')
@@ -182,6 +197,7 @@ def main():
         recall = metrics.get('recall', 0)
         mAP50 = metrics.get('mAP50', 0)
         print(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50")
+        ntfy(f"✅ [{JOB_ID}] Training complete! {recall:.1%} recall, {mAP50:.1%} mAP50")
 
         # Cleanup and terminate
         cleanup_and_terminate()
@@ -189,12 +205,14 @@ def main():
     except NaNDetected as e:
         watchdog_stop.set()
         print(f"{JOB_ID} failed: NaN at epoch {e.epoch}")
+        ntfy(f"❌ [{JOB_ID}] Training failed: NaN detected at epoch {e.epoch}")
         cleanup_efs()
         cleanup_and_terminate()
 
     except Exception as e:
         watchdog_stop.set()
         print(f"{JOB_ID} failed: {str(e)[:100]}")
+        ntfy(f"❌ [{JOB_ID}] Training failed: {str(e)[:80]}")
         cleanup_and_terminate()
 
 
@@ -291,6 +309,8 @@ def train(config, start_epoch):
 
     # Load model
     model_name = config.get('model', 'yolo12m.pt')
+    total_epochs = config.get('epochs', 120)
+    ntfy(f"🏋️ [{JOB_ID}] Training starting: {model_name}, {total_epochs} epochs")
 
     if start_epoch > 0 and CHECKPOINT_FILE.exists():
         print(f"Resuming from checkpoint at epoch {start_epoch}")
@@ -319,9 +339,15 @@ def train(config, start_epoch):
         if loss is not None and (math.isnan(loss) or loss > 100):
             raise NaNDetected(epoch)
 
+        # Send progress notification every 10 epochs
+        if epoch > 0 and epoch % 10 == 0:
+            loss_str = f"{float(loss):.3f}" if loss is not None else "?"
+            ntfy(f"📊 [{JOB_ID}] Epoch {epoch}/{total_epochs} - loss: {loss_str}")
+
         # Check for spot interruption - stop training gracefully
         if spot_interrupted.is_set():
             print(f"Stopping training at epoch {epoch} due to spot interruption")
+            ntfy(f"⚠️ [{JOB_ID}] Spot interruption at epoch {epoch}, saving checkpoint...")
             trainer.stop = True
 
     model.add_callback('on_train_epoch_end', on_train_epoch_end)
@@ -439,6 +465,7 @@ def watchdog(stall_hours):
                 age_hours = (time.time() - checkpoint.stat().st_mtime) / 3600
                 if age_hours > stall_hours:
                     print(f"{JOB_ID} stalled - no checkpoint update in {age_hours:.1f}h")
+                    ntfy(f"⚠️ [{JOB_ID}] Training stalled - no progress in {age_hours:.1f}h, terminating")
                     cleanup_efs()
                     cleanup_and_terminate()
         except Exception as e:

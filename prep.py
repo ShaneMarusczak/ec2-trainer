@@ -54,6 +54,8 @@ def main():
     parser = argparse.ArgumentParser(description='EC2 YOLO Training - Dataset prep and job launcher')
     parser.add_argument('--reset-roboflow-key', action='store_true',
                         help='Reset your Roboflow API key')
+    parser.add_argument('--set-ntfy', metavar='TOPIC',
+                        help='Set ntfy.sh topic for notifications')
     args = parser.parse_args()
 
     print("=" * 60)
@@ -66,6 +68,15 @@ def main():
     # Handle Roboflow key reset
     if args.reset_roboflow_key:
         reset_roboflow_key(infra)
+        return
+
+    # Handle ntfy topic setting
+    if args.set_ntfy:
+        infra['ntfy_topic'] = args.set_ntfy
+        with open(CONFIG_FILE, 'w') as f:
+            yaml.dump(infra, f)
+        print(f"\nntfy topic set to: {args.set_ntfy}")
+        print(f"You'll receive notifications at: https://ntfy.sh/{args.set_ntfy}")
         return
 
     # Show existing jobs if we have a saved bucket
@@ -235,6 +246,7 @@ def load_infra_config():
         'security_group_id': input("Security Group ID (sg-xxxxx): ").strip(),
         'iam_instance_profile': input("IAM Instance Profile name: ").strip(),
         'ami_id': input("AMI ID [ami-0ce8c5eb104aa745d]: ").strip() or 'ami-0ce8c5eb104aa745d',
+        'ntfy_topic': input("ntfy.sh topic (for notifications, optional): ").strip() or None,
     }
 
     with open(CONFIG_FILE, 'w') as f:
@@ -753,18 +765,26 @@ def create_spot_request(job_id, instance_type, bucket, infra):
         print(f"\nSpot request already exists for {job_id}")
         return
 
+    ntfy_topic = infra.get('ntfy_topic', '')
     user_data = f"""#!/bin/bash
 set -e  # Exit on error
 
 export JOB_ID="{job_id}"
 export S3_BUCKET="{bucket}"
 export EFS_ID="{infra['efs_id']}"
+export NTFY_TOPIC="{ntfy_topic}"
+
+# ntfy notification helper
+ntfy() {{
+    [ -n "$NTFY_TOPIC" ] && curl -s -d "$1" "ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1 || true
+}}
 
 # Log everything to S3 for debugging
 exec > >(tee /var/log/user-data.log) 2>&1
 trap 'aws s3 cp /var/log/user-data.log s3://{bucket}/logs/{job_id}.log || true' EXIT
 
 echo "Starting job {job_id} at $(date)"
+ntfy "🚀 [{job_id}] EC2 spot fulfilled, bootstrapping..."
 
 # Install EFS utils if needed
 if ! command -v mount.efs &> /dev/null; then
@@ -782,12 +802,15 @@ done
 # Verify mount
 if ! mountpoint -q /mnt/efs; then
     echo "ERROR: EFS mount failed after 5 attempts"
+    ntfy "❌ [{job_id}] EFS mount failed!"
     exit 1
 fi
+ntfy "✓ [{job_id}] EFS mounted"
 
 # Activate PyTorch env and install deps
 source /opt/conda/bin/activate pytorch
 pip install -q ultralytics boto3 pyyaml requests
+ntfy "✓ [{job_id}] Dependencies installed"
 
 # Download and run trainer
 aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py
