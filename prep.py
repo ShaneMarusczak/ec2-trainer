@@ -155,8 +155,12 @@ def main():
     if overwriting_job:
         print(f"\nReuse dataset from '{overwriting_job}'? [Y/n]")
         if input("> ").strip().lower() != 'n':
-            datasets.append(f"job:{overwriting_job}")
-            print(f"  Using dataset from {overwriting_job}")
+            reuse_path = Path('./jobs') / overwriting_job / 'dataset'
+            if reuse_path.exists():
+                datasets.append(reuse_path)
+                print(f"  Using dataset from {overwriting_job}")
+            else:
+                print(f"  Dataset not found at {reuse_path}, enter manually")
 
     if not datasets:
         print("\nDatasets (Enter when done):")
