@@ -947,7 +947,7 @@ python train.py || terminate "Training script failed"
 
     ec2.request_spot_instances(
         InstanceCount=1,
-        Type='persistent',
+        Type='one-time',
         LaunchSpecification=launch_spec,
         TagSpecifications=[
             {
