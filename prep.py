@@ -896,7 +896,6 @@ ntfy() {{
 
 # Log everything to S3 for debugging
 exec > >(tee /var/log/user-data.log) 2>&1
-trap 'aws s3 cp /var/log/user-data.log s3://{bucket}/logs/{job_id}.log || true' EXIT
 
 echo "Starting job {job_id} at $(date)"
 ntfy "🚀 [{job_id}] EC2 spot fulfilled, bootstrapping..."
@@ -906,10 +905,26 @@ TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-m
 REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
 INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
-# Self-terminate on fatal error
+# Safety net: track if we exit cleanly
+CLEAN_EXIT=false
+
+# Master trap - runs on ANY exit, catches everything
+trap '
+    aws s3 cp /var/log/user-data.log s3://{bucket}/logs/{job_id}.log || true
+    if [ "$CLEAN_EXIT" != "true" ]; then
+        ntfy "💀 [{job_id}] Unexpected exit - self-terminating"
+        aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION" || true
+    fi
+' EXIT
+
+# Max runtime failsafe - 12 hours absolute limit (belt + suspenders + parachute)
+(sleep 43200 && ntfy "⏰ [{job_id}] Max runtime (12h) reached - terminating" && \
+    aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION") &
+
+# Self-terminate on fatal error (with specific message)
 terminate() {{
     ntfy "💀 [{job_id}] Fatal error, self-terminating: $1"
-    aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION || true
+    aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION" || true
     exit 1
 }}
 
@@ -922,7 +937,7 @@ fi
 mkdir -p /mnt/efs
 EFS_DNS="{infra['efs_id']}.efs.$REGION.amazonaws.com"
 for i in 1 2 3 4 5; do
-    mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 $EFS_DNS:/ /mnt/efs && break
+    mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 "$EFS_DNS":/ /mnt/efs && break
     echo "EFS mount attempt $i failed, retrying in 10s..."
     sleep 10
 done
@@ -949,6 +964,10 @@ aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py || terminat
 cd /home/ubuntu
 export AWS_DEFAULT_REGION=$REGION
 python train.py || terminate "Training script failed"
+
+# If we get here, everything succeeded
+CLEAN_EXIT=true
+ntfy "✅ [{job_id}] Job complete - shutting down"
 """
 
     user_data_b64 = base64.b64encode(user_data.encode()).decode()

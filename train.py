@@ -14,6 +14,7 @@ import time
 import math
 import shutil
 import threading
+import atexit
 import requests
 import boto3
 import yaml
@@ -22,6 +23,9 @@ from datetime import datetime
 from functools import wraps
 from botocore.exceptions import ClientError
 from botocore.config import Config
+
+# Safety net: track clean exit
+_clean_exit = False
 
 
 def get_required_env(key):
@@ -73,6 +77,21 @@ ec2 = boto3.client('ec2')
 # Watchdog state
 watchdog_stop = threading.Event()
 spot_interrupted = threading.Event()
+
+
+def _on_exit():
+    """Safety net - notify and terminate if we didn't exit cleanly."""
+    global _clean_exit
+    if not _clean_exit:
+        try:
+            ntfy(f"💀 [{JOB_ID}] train.py died unexpectedly - check logs")
+        except Exception:
+            pass
+        # Note: instance termination handled by bash trap, but log the event
+        print("ERROR: Exiting without clean_exit flag set", file=sys.stderr)
+
+
+atexit.register(_on_exit)
 
 # Training defaults (overridden by config.yaml)
 TRAIN_DEFAULTS = {
@@ -138,18 +157,21 @@ def s3_key_exists(key):
 
 def main():
     """Main entry point."""
+    global _clean_exit
     print(f"{JOB_ID} started on {get_instance_type()}")
 
     try:
         # Check if already complete (previous instance finished but didn't cancel spot)
         if job_already_complete():
             print(f"Job {JOB_ID} already complete. Cleaning up.")
+            _clean_exit = True
             cleanup_and_terminate()
             return
 
         # Check if job still exists in S3
         if not job_exists():
             print(f"Job {JOB_ID} no longer exists in S3. Cleaning up.")
+            _clean_exit = True
             cleanup_and_terminate()
             return
         
@@ -199,20 +221,25 @@ def main():
         print(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50")
         ntfy(f"✅ [{JOB_ID}] Training complete! {recall:.1%} recall, {mAP50:.1%} mAP50")
 
-        # Cleanup and terminate
+        # Mark clean exit and terminate
+        _clean_exit = True
         cleanup_and_terminate()
-        
+
     except NaNDetected as e:
         watchdog_stop.set()
         print(f"{JOB_ID} failed: NaN at epoch {e.epoch}")
         ntfy(f"❌ [{JOB_ID}] Training failed: NaN detected at epoch {e.epoch}")
         cleanup_efs()
+        # Mark clean exit (we handled it) and terminate
+        _clean_exit = True
         cleanup_and_terminate()
 
     except Exception as e:
         watchdog_stop.set()
         print(f"{JOB_ID} failed: {str(e)[:100]}")
         ntfy(f"❌ [{JOB_ID}] Training failed: {str(e)[:80]}")
+        # Mark clean exit (we handled it) and terminate
+        _clean_exit = True
         cleanup_and_terminate()
 
 
