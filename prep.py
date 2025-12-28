@@ -103,6 +103,7 @@ def main():
     print("\nDatasets (Enter when done):")
     print("  - Local path: ~/datasets/my-dataset")
     print("  - Roboflow:   rf:workspace/project/version")
+    print("  - Previous:   job:<job_id>  (reuse merged dataset)")
     print("  - Reset key:  rf:reset")
     print()
 
@@ -117,13 +118,21 @@ def main():
                 continue
             break
 
-        # Check if Roboflow
+        # Check if Roboflow or previous job
         if user_input.lower() == 'rf:reset':
             reset_roboflow_key(infra)
             continue
         elif user_input.startswith('rf:'):
             path = download_roboflow(user_input, infra)
             if not path:
+                continue
+        elif user_input.startswith('job:'):
+            # Reuse merged dataset from previous job
+            prev_job_id = user_input[4:].strip()
+            path = Path('./jobs') / prev_job_id / 'dataset'
+            if not path.exists():
+                print(f"  Not found: {path}")
+                print(f"  (Looking for ./jobs/{prev_job_id}/dataset)")
                 continue
         else:
             path = Path(user_input).expanduser()
@@ -540,22 +549,55 @@ def process_datasets(dataset_paths, job_id):
                 for cls in classes_in_image:
                     class_image_counts[cls] += 1
 
-    # Phase 3: Filter classes by minimum image count
-    print(f"\n  Class distribution (min {MIN_IMAGES_PER_CLASS} images):")
-    final_classes = []
-    for cls, count in sorted(class_image_counts.items(), key=lambda x: -x[1]):
-        if count >= MIN_IMAGES_PER_CLASS:
-            print(f"    {cls}: {count} images [KEEP]")
-            final_classes.append(cls)
-        else:
-            print(f"    {cls}: {count} images [DROP]")
+    # Phase 3: Let user select classes to keep
+    print("\n  Class distribution:")
+    sorted_classes = sorted(class_image_counts.items(), key=lambda x: -x[1])
+    for i, (cls, count) in enumerate(sorted_classes, 1):
+        print(f"    {i}. {cls}: {count} images")
+
+    print("\n  Select classes to keep:")
+    print("    - Enter numbers (e.g., 1,2,3 or 1-3)")
+    print("    - 'all' to keep all classes")
+    print("    - Enter to use default (classes with 50+ images)")
+
+    selection = input("\n  > ").strip().lower()
+
+    if selection == 'all':
+        final_classes = [cls for cls, _ in sorted_classes]
+    elif selection == '':
+        # Default: filter by MIN_IMAGES_PER_CLASS
+        final_classes = [cls for cls, count in sorted_classes if count >= MIN_IMAGES_PER_CLASS]
+        if not final_classes:
+            print("\n  No classes have 50+ images. Keeping all.")
+            final_classes = [cls for cls, _ in sorted_classes]
+    else:
+        # Parse selection (e.g., "1,2,3" or "1-3" or "1,3-5")
+        selected_indices = set()
+        for part in selection.replace(' ', '').split(','):
+            if '-' in part:
+                start, end = part.split('-', 1)
+                try:
+                    for i in range(int(start), int(end) + 1):
+                        selected_indices.add(i)
+                except ValueError:
+                    pass
+            else:
+                try:
+                    selected_indices.add(int(part))
+                except ValueError:
+                    pass
+
+        final_classes = []
+        for i, (cls, _) in enumerate(sorted_classes, 1):
+            if i in selected_indices:
+                final_classes.append(cls)
 
     if not final_classes:
-        print("\n  ERROR: No classes have enough images!")
+        print("\n  ERROR: No classes selected!")
         return None
 
     final_classes = sorted(final_classes)
-    print(f"\n  Final classes: {final_classes}")
+    print(f"\n  Selected classes: {final_classes}")
 
     # Phase 4: Merge with deduplication
     print("\n  Merging...")
