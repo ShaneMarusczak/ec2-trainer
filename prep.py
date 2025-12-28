@@ -852,8 +852,14 @@ if ! mountpoint -q /mnt/efs; then
 fi
 ntfy "✓ [{job_id}] EFS mounted"
 
-# Activate PyTorch env and install deps
-source /opt/conda/bin/activate pytorch || terminate "Failed to activate pytorch env"
+# Activate PyTorch env (try venv first, then conda for older AMIs)
+if [ -f /opt/pytorch/bin/activate ]; then
+    source /opt/pytorch/bin/activate
+elif [ -f /opt/conda/bin/activate ]; then
+    source /opt/conda/bin/activate pytorch
+else
+    terminate "No PyTorch environment found"
+fi
 pip install -q ultralytics boto3 pyyaml requests || terminate "Failed to install pip dependencies"
 ntfy "✓ [{job_id}] Dependencies installed"
 
