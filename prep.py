@@ -56,6 +56,8 @@ def main():
                         help='Reset your Roboflow API key')
     parser.add_argument('--set-ntfy', metavar='TOPIC',
                         help='Set ntfy.sh topic for notifications')
+    parser.add_argument('--set-key', metavar='KEY_NAME',
+                        help='Set EC2 key pair name for SSH access')
     args = parser.parse_args()
 
     print("=" * 60)
@@ -77,6 +79,14 @@ def main():
             yaml.dump(infra, f)
         print(f"\nntfy topic set to: {args.set_ntfy}")
         print(f"You'll receive notifications at: https://ntfy.sh/{args.set_ntfy}")
+        return
+
+    # Handle key pair setting
+    if args.set_key:
+        infra['key_name'] = args.set_key
+        with open(CONFIG_FILE, 'w') as f:
+            yaml.dump(infra, f)
+        print(f"\nSSH key pair set to: {args.set_key}")
         return
 
     # Show existing jobs if we have a saved bucket
@@ -246,6 +256,7 @@ def load_infra_config():
         'security_group_id': input("Security Group ID (sg-xxxxx): ").strip(),
         'iam_instance_profile': input("IAM Instance Profile name: ").strip(),
         'ami_id': input("AMI ID [ami-0ce8c5eb104aa745d]: ").strip() or 'ami-0ce8c5eb104aa745d',
+        'key_name': input("EC2 Key Pair name (for SSH, optional): ").strip() or None,
         'ntfy_topic': input("ntfy.sh topic (for notifications, optional): ").strip() or None,
     }
 
@@ -820,17 +831,15 @@ python train.py
 
     user_data_b64 = base64.b64encode(user_data.encode()).decode()
 
-    ec2.request_spot_instances(
-        InstanceCount=1,
-        Type='persistent',
-        LaunchSpecification={
-            'ImageId': infra['ami_id'],
-            'InstanceType': instance_type,
-            'UserData': user_data_b64,
-            'SubnetId': infra['subnet_id'],
-            'SecurityGroupIds': [infra['security_group_id']],
-            'IamInstanceProfile': {'Name': infra['iam_instance_profile']},
-            'BlockDeviceMappings': [
+    # Build launch specification
+    launch_spec = {
+        'ImageId': infra['ami_id'],
+        'InstanceType': instance_type,
+        'UserData': user_data_b64,
+        'SubnetId': infra['subnet_id'],
+        'SecurityGroupIds': [infra['security_group_id']],
+        'IamInstanceProfile': {'Name': infra['iam_instance_profile']},
+        'BlockDeviceMappings': [
                 {
                     'DeviceName': '/dev/sda1',
                     'Ebs': {
@@ -840,7 +849,16 @@ python train.py
                     }
                 }
             ]
-        },
+        }
+
+    # Add SSH key if configured
+    if infra.get('key_name'):
+        launch_spec['KeyName'] = infra['key_name']
+
+    ec2.request_spot_instances(
+        InstanceCount=1,
+        Type='persistent',
+        LaunchSpecification=launch_spec,
         TagSpecifications=[
             {
                 'ResourceType': 'spot-instances-request',
