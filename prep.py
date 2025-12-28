@@ -68,19 +68,19 @@ def main():
         reset_roboflow_key(infra)
         return
 
-    bucket = pick_bucket(infra)
+    # Show existing jobs if we have a saved bucket
+    saved_bucket = infra.get('bucket')
+    if saved_bucket:
+        list_jobs(saved_bucket)
 
-    # Show existing jobs
-    list_jobs(bucket)
-
-    # Job ID first
+    # Step 1: Job ID
     print("\nJob ID (e.g., spaghetti-v1):")
     job_id = input("> ").strip()
     while not job_id or ' ' in job_id:
         job_id = input("> ").strip()
 
-    # Check if job exists in S3
-    if job_exists(bucket, job_id):
+    # Check if job exists in S3 (if we have a bucket)
+    if saved_bucket and job_exists(saved_bucket, job_id):
         print(f"\nJob '{job_id}' exists in S3.")
         print("  [L]aunch instance")
         print("  [O]verwrite (re-upload)")
@@ -91,7 +91,7 @@ def main():
             # Just launch - get instance type and go
             print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge):")
             instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
-            create_spot_request(job_id, instance_type, bucket, infra)
+            create_spot_request(job_id, instance_type, saved_bucket, infra)
             print("\nTraining started!")
             return
         elif choice != 'o':
@@ -99,7 +99,7 @@ def main():
             return
         # Otherwise continue to overwrite
 
-    # Collect datasets
+    # Step 2: Collect datasets
     print("\nDatasets (Enter when done):")
     print("  - Local path: ~/datasets/my-dataset")
     print("  - Roboflow:   rf:workspace/project/version")
@@ -161,10 +161,24 @@ def main():
             classes = list(classes.values())
         print(f"  Added: {path.name} ({len(classes)} classes: {classes})")
 
-    # Training config
-    config = get_training_config()
+    # Step 3: Analyze datasets and select classes
+    dataset_configs, class_counts = analyze_datasets(datasets)
+    if not class_counts:
+        print("\nNo classes found in datasets!")
+        return
 
-    # Summary
+    final_classes = select_classes(class_counts)
+    if not final_classes:
+        print("Cancelled.")
+        return
+
+    # Step 4: Training config
+    training_config = get_training_config()
+
+    # Step 5: Pick bucket
+    bucket = pick_bucket(infra)
+
+    # Step 6: Summary
     print("\n" + "=" * 60)
     print("  Summary")
     print("=" * 60)
@@ -174,31 +188,32 @@ def main():
         print(f"  Datasets: {len(datasets)} (will merge)")
         for ds in datasets:
             print(f"            - {ds.name}")
+    print(f"  Classes:  {final_classes}")
     print(f"  Job ID:   {job_id}")
-    print(f"  Model:    {config['model']}")
-    print(f"  Instance: {config['instance_type']}")
-    print(f"  Epochs:   {config['epochs']}")
+    print(f"  Model:    {training_config['model']}")
+    print(f"  Instance: {training_config['instance_type']}")
+    print(f"  Epochs:   {training_config['epochs']}")
     print(f"  Bucket:   {bucket}")
 
     if input("\nProceed? [Y/n]: ").strip().lower() not in ['', 'y']:
         print("Cancelled.")
         return
 
-    # Process datasets (unify classes, filter, dedupe)
-    job_dir = process_datasets(datasets, job_id)
+    # Step 7: Merge datasets (non-interactive)
+    job_dir = merge_datasets(dataset_configs, final_classes, job_id)
     if not job_dir:
-        print("Failed to process datasets.")
+        print("Failed to merge datasets.")
         return
 
-    # Write config
+    # Write training config
     with open(job_dir / 'config.yaml', 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
+        yaml.dump(training_config, f, default_flow_style=False)
 
-    # Upload to S3
+    # Step 8: Upload to S3
     upload_to_s3(job_dir, bucket, job_id)
 
-    # Create spot request
-    create_spot_request(job_id, config['instance_type'], bucket, infra)
+    # Step 9: Create spot request
+    create_spot_request(job_id, training_config['instance_type'], bucket, infra)
 
     print("\nTraining started!")
 
@@ -492,12 +507,15 @@ def normalize_class(cls):
     return cls
 
 
-def process_datasets(dataset_paths, job_id):
-    """Process datasets with class unification, filtering, and deduplication."""
-    print(f"\nProcessing {len(dataset_paths)} dataset(s)...")
+def analyze_datasets(dataset_paths):
+    """Analyze datasets: normalize classes and count images per class.
 
-    # Phase 1: Analyze all datasets and normalize classes
-    print("\n  Analyzing classes...")
+    Returns (dataset_configs, class_counts) where:
+    - dataset_configs: list of dicts with path, original_classes, normalized_classes
+    - class_counts: Counter of normalized class -> image count
+    """
+    print(f"\nAnalyzing {len(dataset_paths)} dataset(s)...")
+
     dataset_configs = []
     unknown_classes = set()
 
@@ -521,14 +539,13 @@ def process_datasets(dataset_paths, job_id):
             'original_classes': classes,
             'normalized_classes': normalized,
         })
-        print(f"    {ds_path.name}: {classes} -> {[n for n in normalized if n]}")
+        print(f"  {ds_path.name}: {classes} -> {[n for n in normalized if n]}")
 
     if unknown_classes:
         print(f"\n  Unknown classes (kept as-is): {unknown_classes}")
 
-    # Phase 2: Count images per normalized class
-    print("\n  Counting images per class...")
-    class_image_counts = Counter()
+    # Count images per normalized class
+    class_counts = Counter()
 
     for ds_info in dataset_configs:
         ds_path = ds_info['path']
@@ -547,20 +564,24 @@ def process_datasets(dataset_paths, job_id):
                         if old_id < len(norm_classes) and norm_classes[old_id]:
                             classes_in_image.add(norm_classes[old_id])
                 for cls in classes_in_image:
-                    class_image_counts[cls] += 1
+                    class_counts[cls] += 1
 
-    # Phase 3: Let user select classes to keep
-    print("\n  Class distribution:")
-    sorted_classes = sorted(class_image_counts.items(), key=lambda x: -x[1])
+    return dataset_configs, class_counts
+
+
+def select_classes(class_counts):
+    """Interactive class selection. Returns sorted list of selected classes or None."""
+    print("\nClass distribution:")
+    sorted_classes = sorted(class_counts.items(), key=lambda x: -x[1])
     for i, (cls, count) in enumerate(sorted_classes, 1):
-        print(f"    {i}. {cls}: {count} images")
+        print(f"  {i}. {cls}: {count} images")
 
-    print("\n  Select classes to keep:")
-    print("    - Enter numbers (e.g., 1,2,3 or 1-3)")
-    print("    - 'all' to keep all classes")
-    print("    - Enter to use default (classes with 50+ images)")
+    print("\nSelect classes to keep:")
+    print("  - Enter numbers (e.g., 1,2,3 or 1-3)")
+    print("  - 'all' to keep all classes")
+    print("  - Enter for default (classes with 50+ images)")
 
-    selection = input("\n  > ").strip().lower()
+    selection = input("\n> ").strip().lower()
 
     if selection == 'all':
         final_classes = [cls for cls, _ in sorted_classes]
@@ -593,14 +614,15 @@ def process_datasets(dataset_paths, job_id):
                 final_classes.append(cls)
 
     if not final_classes:
-        print("\n  ERROR: No classes selected!")
         return None
 
-    final_classes = sorted(final_classes)
-    print(f"\n  Selected classes: {final_classes}")
+    return sorted(final_classes)
 
-    # Phase 4: Merge with deduplication
-    print("\n  Merging...")
+
+def merge_datasets(dataset_configs, final_classes, job_id):
+    """Merge datasets with deduplication. Non-interactive."""
+    print("\nMerging datasets...")
+
     job_dir = Path('./jobs') / job_id
     dataset_dir = job_dir / 'dataset'
 
@@ -686,12 +708,10 @@ def process_datasets(dataset_paths, job_id):
             'names': final_classes,
         }, f, default_flow_style=False)
 
-    print("\n  Result:")
-    print(f"    Images: {stats['images']}")
-    print(f"    Annotations: {stats['annotations']}")
-    print(f"    Duplicates removed: {stats['duplicates']}")
-    print(f"    Annotations dropped: {stats['dropped']}")
-    print(f"    Classes: {final_classes}")
+    print(f"  Images: {stats['images']}")
+    print(f"  Annotations: {stats['annotations']}")
+    print(f"  Duplicates removed: {stats['duplicates']}")
+    print(f"  Annotations dropped: {stats['dropped']}")
 
     return job_dir
 
