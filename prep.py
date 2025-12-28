@@ -637,17 +637,40 @@ def create_spot_request(job_id, instance_type, bucket, infra):
         return
 
     user_data = f"""#!/bin/bash
+set -e  # Exit on error
+
 export JOB_ID="{job_id}"
 export S3_BUCKET="{bucket}"
 export EFS_ID="{infra['efs_id']}"
 
-# Mount EFS
+# Log everything to S3 for debugging
+exec > >(tee /var/log/user-data.log) 2>&1
+trap 'aws s3 cp /var/log/user-data.log s3://{bucket}/logs/{job_id}.log || true' EXIT
+
+echo "Starting job {job_id} at $(date)"
+
+# Install EFS utils if needed
+if ! command -v mount.efs &> /dev/null; then
+    apt-get update -qq && apt-get install -y -qq amazon-efs-utils
+fi
+
+# Mount EFS with retry
 mkdir -p /mnt/efs
-mount -t efs {infra['efs_id']}:/ /mnt/efs
+for i in 1 2 3 4 5; do
+    mount -t efs {infra['efs_id']}:/ /mnt/efs && break
+    echo "EFS mount attempt $i failed, retrying in 10s..."
+    sleep 10
+done
+
+# Verify mount
+if ! mountpoint -q /mnt/efs; then
+    echo "ERROR: EFS mount failed after 5 attempts"
+    exit 1
+fi
 
 # Activate PyTorch env and install deps
 source /opt/conda/bin/activate pytorch
-pip install ultralytics boto3 pyyaml requests
+pip install -q ultralytics boto3 pyyaml requests
 
 # Download and run trainer
 aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py

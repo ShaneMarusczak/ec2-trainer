@@ -41,9 +41,10 @@ EFS_ID = get_required_env('EFS_ID')
 EFS_ROOT = Path('/mnt/efs')
 JOB_DIR = EFS_ROOT / JOB_ID
 EPOCH_FILE = JOB_DIR / 'epoch.txt'
-CHECKPOINT_FILE = JOB_DIR / 'last.pt'
 DATASET_DIR = JOB_DIR / 'dataset'
 LOCAL_WEIGHTS_DIR = JOB_DIR / 'weights'
+# YOLO saves checkpoints here
+CHECKPOINT_FILE = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'last.pt'
 
 # AWS clients with retry config
 s3_config = Config(
@@ -56,6 +57,7 @@ ec2 = boto3.client('ec2')
 
 # Watchdog state
 watchdog_stop = threading.Event()
+spot_interrupted = threading.Event()
 
 # Training defaults (overridden by config.yaml)
 TRAIN_DEFAULTS = {
@@ -152,7 +154,7 @@ def main():
         start_epoch = read_epoch()
         print(f"Starting from epoch {start_epoch}")
         
-        # Start watchdog
+        # Start watchdog and spot interruption monitor
         stall_hours = config.get('stall_hours', 2)
         watchdog_thread = threading.Thread(
             target=watchdog,
@@ -160,6 +162,12 @@ def main():
             daemon=True
         )
         watchdog_thread.start()
+
+        spot_monitor = threading.Thread(
+            target=spot_interruption_monitor,
+            daemon=True
+        )
+        spot_monitor.start()
         
         # Train
         metrics = train(config, start_epoch)
@@ -215,7 +223,6 @@ def pull_config():
     return config
 
 
-@retry_on_transient()
 def pull_dataset_if_needed():
     """Download dataset from S3 if not already present."""
     if DATASET_DIR.exists() and any(DATASET_DIR.iterdir()):
@@ -225,20 +232,15 @@ def pull_dataset_if_needed():
     print("Pulling dataset from S3...")
     DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
-    # List and download all dataset files
-    paginator = s3.get_paginator('list_objects_v2')
-    prefix = f"jobs/{JOB_ID}/dataset/"
-
-    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
-        for obj in page.get('Contents', []):
-            key = obj['Key']
-            relative_path = key[len(prefix):]
-            if not relative_path:  # Skip directory markers
-                continue
-            local_path = DATASET_DIR / relative_path
-
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            s3.download_file(S3_BUCKET, key, str(local_path))
+    # Use aws s3 sync for parallel downloads
+    import subprocess
+    cmd = [
+        'aws', 's3', 'sync',
+        f's3://{S3_BUCKET}/jobs/{JOB_ID}/dataset/',
+        str(DATASET_DIR),
+        '--only-show-errors'
+    ]
+    subprocess.run(cmd, check=True)
 
     print(f"Dataset downloaded to {DATASET_DIR}")
 
@@ -317,6 +319,11 @@ def train(config, start_epoch):
         if loss is not None and (math.isnan(loss) or loss > 100):
             raise NaNDetected(epoch)
 
+        # Check for spot interruption - stop training gracefully
+        if spot_interrupted.is_set():
+            print(f"Stopping training at epoch {epoch} due to spot interruption")
+            trainer.stop = True
+
     model.add_callback('on_train_epoch_end', on_train_epoch_end)
 
     # Build training args: defaults merged with user config
@@ -392,6 +399,26 @@ def upload_weights(config, metrics):
     print(f"Uploaded results to s3://{S3_BUCKET}/weights/{JOB_ID}/")
 
 
+def spot_interruption_monitor():
+    """Monitor for spot instance interruption notice (2-min warning)."""
+    while not watchdog_stop.is_set():
+        time.sleep(5)  # Check every 5 seconds
+
+        if watchdog_stop.is_set():
+            break
+
+        try:
+            # Check for spot interruption notice
+            action = get_metadata('spot/instance-action')
+            if action:
+                print(f"SPOT INTERRUPTION: {action}")
+                spot_interrupted.set()
+                # Don't terminate - let training save checkpoint and exit gracefully
+                break
+        except Exception:
+            pass  # No interruption notice
+
+
 def watchdog(stall_hours):
     """Monitor training progress via checkpoint file mtime."""
     checkpoint = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'last.pt'
@@ -432,45 +459,71 @@ def cleanup_and_terminate():
     """Cancel spot request and terminate instance."""
     try:
         # Get instance ID
-        instance_id = requests.get(
-            'http://169.254.169.254/latest/meta-data/instance-id',
-            timeout=2
-        ).text
-        
+        instance_id = get_metadata('instance-id')
+        if not instance_id:
+            print("Could not get instance ID")
+            sys.exit(1)
+
         # Get spot request ID
         response = ec2.describe_spot_instance_requests(
             Filters=[
                 {'Name': 'instance-id', 'Values': [instance_id]}
             ]
         )
-        
+
         if response['SpotInstanceRequests']:
             spot_request_id = response['SpotInstanceRequests'][0]['SpotInstanceRequestId']
-            
+
             # Cancel spot request (prevents respawn)
             ec2.cancel_spot_instance_requests(
                 SpotInstanceRequestIds=[spot_request_id]
             )
             print(f"Cancelled spot request: {spot_request_id}")
-        
+
         # Terminate instance
         ec2.terminate_instances(InstanceIds=[instance_id])
         print(f"Terminated instance: {instance_id}")
-        
+
     except Exception as e:
         print(f"Error during cleanup: {e}")
         sys.exit(1)
 
 
+def get_imds_token():
+    """Get IMDSv2 token for metadata access."""
+    try:
+        response = requests.put(
+            'http://169.254.169.254/latest/api/token',
+            headers={'X-aws-ec2-metadata-token-ttl-seconds': '300'},
+            timeout=2
+        )
+        return response.text
+    except requests.RequestException:
+        return None
+
+
+def get_metadata(path):
+    """Get instance metadata (supports both IMDSv1 and IMDSv2)."""
+    url = f'http://169.254.169.254/latest/meta-data/{path}'
+    try:
+        # Try IMDSv2 first
+        token = get_imds_token()
+        if token:
+            response = requests.get(
+                url,
+                headers={'X-aws-ec2-metadata-token': token},
+                timeout=2
+            )
+            return response.text
+        # Fall back to IMDSv1
+        return requests.get(url, timeout=2).text
+    except requests.RequestException:
+        return None
+
+
 def get_instance_type():
     """Get current instance type."""
-    try:
-        return requests.get(
-            'http://169.254.169.254/latest/meta-data/instance-type',
-            timeout=2
-        ).text
-    except requests.RequestException:
-        return "unknown"
+    return get_metadata('instance-type') or "unknown"
 
 
 if __name__ == '__main__':
