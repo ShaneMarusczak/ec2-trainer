@@ -262,17 +262,23 @@ def load_infra_config():
         ('ntfy_topic', 'ntfy.sh topic (for notifications, optional)', False, None),
     ]
 
-    # Prompt for any missing fields
+    # Prompt for any missing or empty fields
     updated = False
     for key, prompt, required, default in fields:
-        if key not in config:
+        current = config.get(key)
+        if current is None and not required:
+            # Optional field not set - prompt for it
             if default:
                 prompt = f"{prompt} [{default}]"
             value = input(f"{prompt}: ").strip()
-            if not value and required:
-                while not value:
-                    value = input(f"{prompt}: ").strip()
             config[key] = value or default
+            updated = True
+        elif current is None and required:
+            # Required field not set - prompt until we get a value
+            value = input(f"{prompt}: ").strip()
+            while not value:
+                value = input(f"{prompt}: ").strip()
+            config[key] = value
             updated = True
 
     # Save if we added anything
