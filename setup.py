@@ -225,7 +225,7 @@ def main():
         'subnet_id': subnet_id,
         'security_group_id': sg_id,
         'iam_instance_profile': 'yolo-trainer',
-        'ami_id': 'ami-0a0c8eebcdd6dcbd0',  # Deep Learning AMI GPU PyTorch 2.5 (Ubuntu 22.04)
+        'ami_id': 'ami-0ce8c5eb104aa745d',  # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Ubuntu 22.04)
         'bucket': bucket_name,
     }
 

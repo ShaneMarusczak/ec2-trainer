@@ -179,7 +179,7 @@ def load_infra_config():
         'subnet_id': input("Subnet ID (subnet-xxxxx): ").strip(),
         'security_group_id': input("Security Group ID (sg-xxxxx): ").strip(),
         'iam_instance_profile': input("IAM Instance Profile name: ").strip(),
-        'ami_id': input("AMI ID [ami-0a0c8eebcdd6dcbd0]: ").strip() or 'ami-0a0c8eebcdd6dcbd0',
+        'ami_id': input("AMI ID [ami-0ce8c5eb104aa745d]: ").strip() or 'ami-0ce8c5eb104aa745d',
     }
 
     with open(CONFIG_FILE, 'w') as f:
