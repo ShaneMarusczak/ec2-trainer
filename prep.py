@@ -57,6 +57,9 @@ def main():
     infra = load_infra_config()
     bucket = pick_bucket(infra)
 
+    # Show existing jobs
+    list_jobs(bucket)
+
     # Job ID first
     print("\nJob ID (e.g., spaghetti-v1):")
     job_id = input("> ").strip()
@@ -316,6 +319,69 @@ def job_exists(bucket, job_id):
         return response.get('KeyCount', 0) > 0
     except Exception:
         return False
+
+
+def list_jobs(bucket):
+    """List existing jobs and their status."""
+    s3 = boto3.client('s3')
+    ec2 = boto3.client('ec2')
+
+    # Get jobs from S3
+    jobs = {}
+    try:
+        paginator = s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=bucket, Prefix='jobs/', Delimiter='/'):
+            for prefix in page.get('CommonPrefixes', []):
+                job_id = prefix['Prefix'].split('/')[1]
+                jobs[job_id] = {'status': 'pending'}
+    except Exception:
+        return
+
+    if not jobs:
+        return
+
+    # Check which have weights (complete)
+    try:
+        for page in paginator.paginate(Bucket=bucket, Prefix='weights/', Delimiter='/'):
+            for prefix in page.get('CommonPrefixes', []):
+                job_id = prefix['Prefix'].split('/')[1]
+                if job_id in jobs:
+                    jobs[job_id]['status'] = 'complete'
+    except Exception:
+        pass
+
+    # Check active spot requests
+    try:
+        response = ec2.describe_spot_instance_requests(
+            Filters=[
+                {'Name': 'state', 'Values': ['open', 'active']},
+                {'Name': 'tag-key', 'Values': ['JobId']}
+            ]
+        )
+        for req in response['SpotInstanceRequests']:
+            job_id = next((t['Value'] for t in req.get('Tags', []) if t['Key'] == 'JobId'), None)
+            if job_id and job_id in jobs:
+                if req.get('InstanceId'):
+                    jobs[job_id]['status'] = 'running'
+                    jobs[job_id]['instance'] = req['LaunchSpecification']['InstanceType']
+                else:
+                    jobs[job_id]['status'] = 'starting'
+    except Exception:
+        pass
+
+    # Display
+    print("\nExisting jobs:")
+    for job_id in sorted(jobs.keys()):
+        info = jobs[job_id]
+        status = info['status']
+        if status == 'complete':
+            print(f"  {job_id}: complete")
+        elif status == 'running':
+            print(f"  {job_id}: running ({info.get('instance', '?')})")
+        elif status == 'starting':
+            print(f"  {job_id}: starting...")
+        else:
+            print(f"  {job_id}: pending")
 
 
 def get_training_config():
