@@ -55,9 +55,36 @@ def main():
 
     # Load or create infrastructure config
     infra = load_infra_config()
+    bucket = pick_bucket(infra)
+
+    # Job ID first
+    print("\nJob ID (e.g., spaghetti-v1):")
+    job_id = input("> ").strip()
+    while not job_id or ' ' in job_id:
+        job_id = input("> ").strip()
+
+    # Check if job exists in S3
+    if job_exists(bucket, job_id):
+        print(f"\nJob '{job_id}' exists in S3.")
+        print("  [L]aunch instance")
+        print("  [O]verwrite (re-upload)")
+        print("  [C]ancel")
+        choice = input("\n> ").strip().lower()
+
+        if choice == 'l':
+            # Just launch - get instance type and go
+            print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge):")
+            instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
+            create_spot_request(job_id, instance_type, bucket, infra)
+            print("\nTraining started!")
+            return
+        elif choice != 'o':
+            print("Cancelled.")
+            return
+        # Otherwise continue to overwrite
 
     # Collect datasets
-    print("\nDatasets to upload (Enter when done):")
+    print("\nDatasets (Enter when done):")
     print("  - Local path: ~/datasets/my-dataset")
     print("  - Roboflow:   rf:workspace/project/version")
     print()
@@ -105,17 +132,8 @@ def main():
             classes = list(classes.values())
         print(f"  Added: {path.name} ({len(classes)} classes: {classes})")
 
-    # Job ID
-    print("\nJob ID (e.g., spaghetti-v1):")
-    job_id = input("\n> ").strip()
-    while not job_id or ' ' in job_id:
-        job_id = input("> ").strip()
-
     # Training config
     config = get_training_config()
-
-    # S3 bucket
-    bucket = pick_bucket(infra)
 
     # Summary
     print("\n" + "=" * 60)
@@ -137,13 +155,6 @@ def main():
         print("Cancelled.")
         return
 
-    # Check if job already exists
-    if job_exists(bucket, job_id):
-        print(f"\n  Warning: Job '{job_id}' already exists in S3!")
-        if input("  Overwrite? [y/N]: ").strip().lower() != 'y':
-            print("Cancelled.")
-            return
-
     # Process datasets (unify classes, filter, dedupe)
     job_dir = process_datasets(datasets, job_id)
     if not job_dir:
@@ -160,7 +171,7 @@ def main():
     # Create spot request
     create_spot_request(job_id, config['instance_type'], bucket, infra)
 
-    print("\nTraining started! Run pull.py to check progress.")
+    print("\nTraining started!")
 
 
 def load_infra_config():
