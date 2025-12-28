@@ -4,8 +4,10 @@ EC2 YOLO Training - Dataset prep and job launcher.
 
 Usage:
     python prep.py
+    python prep.py --reset-roboflow-key
 """
 
+import argparse
 import base64
 import hashlib
 import shutil
@@ -49,12 +51,23 @@ CLASS_UNIFICATION = {
 
 
 def main():
+    parser = argparse.ArgumentParser(description='EC2 YOLO Training - Dataset prep and job launcher')
+    parser.add_argument('--reset-roboflow-key', action='store_true',
+                        help='Reset your Roboflow API key')
+    args = parser.parse_args()
+
     print("=" * 60)
     print("  EC2 YOLO Training")
     print("=" * 60)
 
     # Load or create infrastructure config
     infra = load_infra_config()
+
+    # Handle Roboflow key reset
+    if args.reset_roboflow_key:
+        reset_roboflow_key(infra)
+        return
+
     bucket = pick_bucket(infra)
 
     # Show existing jobs
@@ -90,6 +103,7 @@ def main():
     print("\nDatasets (Enter when done):")
     print("  - Local path: ~/datasets/my-dataset")
     print("  - Roboflow:   rf:workspace/project/version")
+    print("  - Reset key:  rf:reset")
     print()
 
     datasets = []
@@ -104,7 +118,10 @@ def main():
             break
 
         # Check if Roboflow
-        if user_input.startswith('rf:'):
+        if user_input.lower() == 'rf:reset':
+            reset_roboflow_key(infra)
+            continue
+        elif user_input.startswith('rf:'):
             path = download_roboflow(user_input, infra)
             if not path:
                 continue
@@ -203,6 +220,29 @@ def load_infra_config():
     return config
 
 
+def reset_roboflow_key(infra):
+    """Reset the Roboflow API key."""
+    current_key = infra.get('roboflow_api_key')
+    if current_key:
+        masked = current_key[:4] + '...' + current_key[-4:] if len(current_key) > 8 else '****'
+        print(f"\nCurrent Roboflow API key: {masked}")
+    else:
+        print("\nNo Roboflow API key currently configured.")
+
+    print("\nEnter new Roboflow API key (from roboflow.com/settings):")
+    print("  (Press Enter to cancel)")
+    new_key = input("> ").strip()
+
+    if not new_key:
+        print("Cancelled.")
+        return
+
+    infra['roboflow_api_key'] = new_key
+    with open(CONFIG_FILE, 'w') as f:
+        yaml.dump(infra, f)
+    print(f"\nRoboflow API key updated in {CONFIG_FILE}")
+
+
 def download_roboflow(rf_string, infra):
     """Download dataset from Roboflow.
 
@@ -259,7 +299,22 @@ def download_roboflow(rf_string, infra):
         print(f"  Downloaded to: {path}")
         return path
     except Exception as e:
-        print(f"  Failed: {e}")
+        error_msg = str(e).lower()
+        # Check for authentication-related errors
+        if any(keyword in error_msg for keyword in ['unauthorized', 'invalid api', 'authentication', '401', 'forbidden', '403']):
+            print(f"  Authentication failed: {e}")
+            print("\n  Your API key may be invalid or expired.")
+            print("  Would you like to enter a new API key? [Y/n]:")
+            if input("  > ").strip().lower() in ['', 'y', 'yes']:
+                print("\n  Enter new Roboflow API key (from roboflow.com/settings):")
+                new_key = input("  > ").strip()
+                if new_key:
+                    infra['roboflow_api_key'] = new_key
+                    with open(CONFIG_FILE, 'w') as f:
+                        yaml.dump(infra, f)
+                    print("  API key updated. Please try the download again.")
+        else:
+            print(f"  Failed: {e}")
         return None
 
 
