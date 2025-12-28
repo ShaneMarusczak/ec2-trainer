@@ -127,6 +127,7 @@ def main():
             return
 
     # Check if job exists in S3 (if we have a bucket)
+    overwriting_job = None
     if saved_bucket and job_exists(saved_bucket, job_id):
         print(f"\nJob '{job_id}' exists in S3.")
         print("  [L]aunch instance")
@@ -145,68 +146,78 @@ def main():
             print("Cancelled.")
             return
         # Otherwise continue to overwrite
+        overwriting_job = job_id
 
     # Step 2: Collect datasets
-    print("\nDatasets (Enter when done):")
-    print("  - Local path: ~/datasets/my-dataset")
-    print("  - Roboflow:   rf:workspace/project/version")
-    print("  - Previous:   job:<job_id>  (reuse merged dataset)")
-    print("  - Reset key:  rf:reset")
-    print()
-
     datasets = []
-    while True:
-        prompt = f"Dataset {len(datasets) + 1}: " if datasets else "Dataset: "
-        user_input = input(prompt).strip()
 
-        if not user_input:
-            if not datasets:
-                print("  Need at least one dataset")
-                continue
-            break
+    # Offer to reuse dataset if overwriting
+    if overwriting_job:
+        print(f"\nReuse dataset from '{overwriting_job}'? [Y/n]")
+        if input("> ").strip().lower() != 'n':
+            datasets.append(f"job:{overwriting_job}")
+            print(f"  Using dataset from {overwriting_job}")
 
-        # Check if Roboflow or previous job
-        if user_input.lower() == 'rf:reset':
-            reset_roboflow_key(infra)
-            continue
-        elif user_input.startswith('rf:'):
-            path = download_roboflow(user_input, infra)
-            if not path:
-                continue
-        elif user_input.startswith('job:'):
-            # Reuse merged dataset from previous job
-            prev_job_id = user_input[4:].strip()
-            path = Path('./jobs') / prev_job_id / 'dataset'
-            if not path.exists():
-                print(f"  Not found: {path}")
-                print(f"  (Looking for ./jobs/{prev_job_id}/dataset)")
-                continue
-        else:
-            path = Path(user_input).expanduser()
-            if not path.exists():
-                print(f"  Not found: {path}")
-                continue
+    if not datasets:
+        print("\nDatasets (Enter when done):")
+        print("  - Local path: ~/datasets/my-dataset")
+        print("  - Roboflow:   rf:workspace/project/version")
+        print("  - Previous:   job:<job_id>  (reuse merged dataset)")
+        print("  - Reset key:  rf:reset")
+        print()
 
-        # Find data.yaml
-        data_yaml = path / 'data.yaml'
-        if not data_yaml.exists():
-            found = list(path.rglob('data.yaml'))
-            if found:
-                path = found[0].parent
-                print(f"  Found: {path}")
+        while True:
+            prompt = f"Dataset {len(datasets) + 1}: " if datasets else "Dataset: "
+            user_input = input(prompt).strip()
+
+            if not user_input:
+                if not datasets:
+                    print("  Need at least one dataset")
+                    continue
+                break
+
+            # Check if Roboflow or previous job
+            if user_input.lower() == 'rf:reset':
+                reset_roboflow_key(infra)
+                continue
+            elif user_input.startswith('rf:'):
+                path = download_roboflow(user_input, infra)
+                if not path:
+                    continue
+            elif user_input.startswith('job:'):
+                # Reuse merged dataset from previous job
+                prev_job_id = user_input[4:].strip()
+                path = Path('./jobs') / prev_job_id / 'dataset'
+                if not path.exists():
+                    print(f"  Not found: {path}")
+                    print(f"  (Looking for ./jobs/{prev_job_id}/dataset)")
+                    continue
             else:
-                print(f"  No data.yaml in {path}")
-                continue
+                path = Path(user_input).expanduser()
+                if not path.exists():
+                    print(f"  Not found: {path}")
+                    continue
 
-        datasets.append(path)
+            # Find data.yaml
+            data_yaml = path / 'data.yaml'
+            if not data_yaml.exists():
+                found = list(path.rglob('data.yaml'))
+                if found:
+                    path = found[0].parent
+                    print(f"  Found: {path}")
+                else:
+                    print(f"  No data.yaml in {path}")
+                    continue
 
-        # Show what we found
-        with open(path / 'data.yaml') as f:
-            config = yaml.safe_load(f)
-        classes = config.get('names', [])
-        if isinstance(classes, dict):
-            classes = list(classes.values())
-        print(f"  Added: {path.name} ({len(classes)} classes: {classes})")
+            datasets.append(path)
+
+            # Show what we found
+            with open(path / 'data.yaml') as f:
+                config = yaml.safe_load(f)
+            classes = config.get('names', [])
+            if isinstance(classes, dict):
+                classes = list(classes.values())
+            print(f"  Added: {path.name} ({len(classes)} classes: {classes})")
 
     # Step 3: Analyze datasets and select classes
     dataset_configs, class_counts = analyze_datasets(datasets)
