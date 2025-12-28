@@ -240,29 +240,46 @@ def main():
 
 
 def load_infra_config():
-    """Load or create infrastructure config."""
+    """Load or create infrastructure config, prompting for any missing fields."""
+    # Load existing config or start fresh
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
-            config = yaml.safe_load(f)
-        print(f"\nUsing config from {CONFIG_FILE}")
-        return config
+            config = yaml.safe_load(f) or {}
+        print(f"\nLoaded config from {CONFIG_FILE}")
+    else:
+        config = {}
+        print("\nFirst run - need AWS infrastructure config.")
+        print("(This will be saved to ~/.ec2-trainer.yaml)\n")
 
-    print("\nFirst run - need AWS infrastructure config.")
-    print("(This will be saved to ~/.ec2-trainer.yaml)\n")
+    # Define all fields: (key, prompt, required, default)
+    fields = [
+        ('efs_id', 'EFS ID (fs-xxxxx)', True, None),
+        ('subnet_id', 'Subnet ID (subnet-xxxxx)', True, None),
+        ('security_group_id', 'Security Group ID (sg-xxxxx)', True, None),
+        ('iam_instance_profile', 'IAM Instance Profile name', True, None),
+        ('ami_id', 'AMI ID', False, 'ami-0ce8c5eb104aa745d'),
+        ('key_name', 'EC2 Key Pair name (for SSH, optional)', False, None),
+        ('ntfy_topic', 'ntfy.sh topic (for notifications, optional)', False, None),
+    ]
 
-    config = {
-        'efs_id': input("EFS ID (fs-xxxxx): ").strip(),
-        'subnet_id': input("Subnet ID (subnet-xxxxx): ").strip(),
-        'security_group_id': input("Security Group ID (sg-xxxxx): ").strip(),
-        'iam_instance_profile': input("IAM Instance Profile name: ").strip(),
-        'ami_id': input("AMI ID [ami-0ce8c5eb104aa745d]: ").strip() or 'ami-0ce8c5eb104aa745d',
-        'key_name': input("EC2 Key Pair name (for SSH, optional): ").strip() or None,
-        'ntfy_topic': input("ntfy.sh topic (for notifications, optional): ").strip() or None,
-    }
+    # Prompt for any missing fields
+    updated = False
+    for key, prompt, required, default in fields:
+        if key not in config:
+            if default:
+                prompt = f"{prompt} [{default}]"
+            value = input(f"{prompt}: ").strip()
+            if not value and required:
+                while not value:
+                    value = input(f"{prompt}: ").strip()
+            config[key] = value or default
+            updated = True
 
-    with open(CONFIG_FILE, 'w') as f:
-        yaml.dump(config, f)
-    print(f"\nSaved to {CONFIG_FILE}")
+    # Save if we added anything
+    if updated:
+        with open(CONFIG_FILE, 'w') as f:
+            yaml.dump(config, f)
+        print(f"\nSaved to {CONFIG_FILE}")
 
     return config
 
