@@ -530,7 +530,6 @@ def upload_to_s3(job_dir, bucket, job_id):
         'aws', 's3', 'sync',
         str(job_dir),
         f's3://{bucket}/jobs/{job_id}/',
-        '--only-show-errors'
     ]
     subprocess.run(cmd, check=True)
 
