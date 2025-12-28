@@ -797,36 +797,47 @@ trap 'aws s3 cp /var/log/user-data.log s3://{bucket}/logs/{job_id}.log || true' 
 echo "Starting job {job_id} at $(date)"
 ntfy "🚀 [{job_id}] EC2 spot fulfilled, bootstrapping..."
 
-# Install EFS utils if needed
-if ! command -v mount.efs &> /dev/null; then
-    apt-get update -qq && apt-get install -y -qq amazon-efs-utils
+# Get region from instance metadata
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+# Self-terminate on fatal error
+terminate() {{
+    ntfy "💀 [{job_id}] Fatal error, self-terminating: $1"
+    aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION || true
+    exit 1
+}}
+
+# Install NFS utils if needed
+if ! command -v mount.nfs4 &> /dev/null; then
+    apt-get update -qq && apt-get install -y -qq nfs-common || terminate "Failed to install nfs-common"
 fi
 
-# Mount EFS with retry
+# Mount EFS via NFS4 with retry
 mkdir -p /mnt/efs
+EFS_DNS="{infra['efs_id']}.efs.$REGION.amazonaws.com"
 for i in 1 2 3 4 5; do
-    mount -t efs {infra['efs_id']}:/ /mnt/efs && break
+    mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 $EFS_DNS:/ /mnt/efs && break
     echo "EFS mount attempt $i failed, retrying in 10s..."
     sleep 10
 done
 
 # Verify mount
 if ! mountpoint -q /mnt/efs; then
-    echo "ERROR: EFS mount failed after 5 attempts"
-    ntfy "❌ [{job_id}] EFS mount failed!"
-    exit 1
+    terminate "EFS mount failed after 5 attempts"
 fi
 ntfy "✓ [{job_id}] EFS mounted"
 
 # Activate PyTorch env and install deps
-source /opt/conda/bin/activate pytorch
-pip install -q ultralytics boto3 pyyaml requests
+source /opt/conda/bin/activate pytorch || terminate "Failed to activate pytorch env"
+pip install -q ultralytics boto3 pyyaml requests || terminate "Failed to install pip dependencies"
 ntfy "✓ [{job_id}] Dependencies installed"
 
 # Download and run trainer
-aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py
+aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py || terminate "Failed to download train.py from S3"
 cd /home/ubuntu
-python train.py
+python train.py || terminate "Training script failed"
 """
 
     user_data_b64 = base64.b64encode(user_data.encode()).decode()
