@@ -900,6 +900,7 @@ ntfy "✓ [{job_id}] Dependencies installed"
 # Download and run trainer
 aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py || terminate "Failed to download train.py from S3"
 cd /home/ubuntu
+export AWS_DEFAULT_REGION=$REGION
 python train.py || terminate "Training script failed"
 """
 
