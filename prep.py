@@ -20,11 +20,32 @@ for pkg, imp in [('boto3', 'boto3'), ('pyyaml', 'yaml')]:
     except ImportError:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg, '-q'])
 
+from collections import Counter
+
 import boto3
 import yaml
 
 CONFIG_FILE = Path.home() / '.ec2-trainer.yaml'
 DATASETS_DIR = Path('./datasets')
+MIN_IMAGES_PER_CLASS = 50
+
+# Class unification mapping - maps various names to canonical form (None = drop)
+CLASS_UNIFICATION = {
+    # Spaghetti variants
+    'spaghetti': 'spaghetti', 'Spaghetti': 'spaghetti', 'spagatti': 'spaghetti',
+    'Spagatti': 'spaghetti', 'spahgetti': 'spaghetti',
+    'fail': 'spaghetti', 'failure': 'spaghetti', 'defect': 'spaghetti',
+    # Normal/good (drop - we only detect failures)
+    'normal': None, 'good': None, 'ok': None, 'OK': None,
+    # Other failure types (drop - not spaghetti)
+    'bed_adhesion': None, 'bed adhesion': None, 'bed adhesion failure': None,
+    'poor initial layer bed adhesion faiure': None, 'adhesion': None,
+    'blobs': None, 'Blobs': None, 'blob': None, 'nozzle blob': None,
+    'nozzle blob failure': None, 'cracks': None, 'Crack': None, 'crack': None,
+    'stringing': None, 'Stringing': None, 'warping': None,
+    'under_extrusion': None, 'under-extrusion': None,
+    'over_extrusion': None, 'over-extrusion': None,
+}
 
 
 def main():
@@ -123,11 +144,11 @@ def main():
             print("Cancelled.")
             return
 
-    # Process datasets
-    if len(datasets) == 1:
-        job_dir = copy_single_dataset(datasets[0], job_id)
-    else:
-        job_dir = merge_datasets(datasets, job_id)
+    # Process datasets (unify classes, filter, dedupe)
+    job_dir = process_datasets(datasets, job_id)
+    if not job_dir:
+        print("Failed to process datasets.")
+        return
 
     # Write config
     with open(job_dir / 'config.yaml', 'w') as f:
@@ -310,26 +331,28 @@ def get_training_config():
     }
 
 
-def copy_single_dataset(dataset_path, job_id):
-    """Copy a single dataset to job structure."""
-    job_dir = Path('./jobs') / job_id
-    dest = job_dir / 'dataset'
+def normalize_class(cls):
+    """Normalize a class name using the unification mapping."""
+    if cls in CLASS_UNIFICATION:
+        return CLASS_UNIFICATION[cls]
+    # Try lowercase normalization
+    cls_lower = cls.lower().replace(' ', '_').replace('-', '_')
+    if cls_lower in ['spaghetti', 'spagatti', 'spahgetti']:
+        return 'spaghetti'
+    if cls_lower in ['normal', 'good', 'ok']:
+        return None
+    # Unknown class - keep it but warn
+    return cls
 
-    if dest.exists():
-        shutil.rmtree(dest)
 
-    shutil.copytree(dataset_path, dest)
-    print(f"\n  Created: {job_dir}")
+def process_datasets(dataset_paths, job_id):
+    """Process datasets with class unification, filtering, and deduplication."""
+    print(f"\nProcessing {len(dataset_paths)} dataset(s)...")
 
-    return job_dir
-
-
-def merge_datasets(dataset_paths, job_id):
-    """Merge multiple YOLO datasets."""
-    print(f"\nMerging {len(dataset_paths)} datasets...")
-
-    all_classes = {}
+    # Phase 1: Analyze all datasets and normalize classes
+    print("\n  Analyzing classes...")
     dataset_configs = []
+    unknown_classes = set()
 
     for ds_path in dataset_paths:
         with open(ds_path / 'data.yaml') as f:
@@ -339,29 +362,89 @@ def merge_datasets(dataset_paths, job_id):
         if isinstance(classes, dict):
             classes = list(classes.values())
 
+        normalized = []
         for cls in classes:
-            all_classes[cls] = all_classes.get(cls, 0) + 1
+            norm = normalize_class(cls)
+            normalized.append(norm)
+            if norm and cls not in CLASS_UNIFICATION:
+                unknown_classes.add(cls)
 
-        dataset_configs.append({'path': ds_path, 'classes': classes})
+        dataset_configs.append({
+            'path': ds_path,
+            'original_classes': classes,
+            'normalized_classes': normalized,
+        })
+        print(f"    {ds_path.name}: {classes} -> {[n for n in normalized if n]}")
 
-    unified_classes = sorted(all_classes.keys())
-    print(f"  Unified classes: {unified_classes}")
+    if unknown_classes:
+        print(f"\n  Unknown classes (kept as-is): {unknown_classes}")
 
+    # Phase 2: Count images per normalized class
+    print("\n  Counting images per class...")
+    class_image_counts = Counter()
+
+    for ds_info in dataset_configs:
+        ds_path = ds_info['path']
+        norm_classes = ds_info['normalized_classes']
+
+        for split in ['train', 'valid']:
+            lbl_dir = ds_path / split / 'labels'
+            if not lbl_dir.exists():
+                continue
+
+            for lbl_path in lbl_dir.glob('*.txt'):
+                classes_in_image = set()
+                for line in lbl_path.read_text().strip().split('\n'):
+                    if line.strip():
+                        old_id = int(line.split()[0])
+                        if old_id < len(norm_classes) and norm_classes[old_id]:
+                            classes_in_image.add(norm_classes[old_id])
+                for cls in classes_in_image:
+                    class_image_counts[cls] += 1
+
+    # Phase 3: Filter classes by minimum image count
+    print(f"\n  Class distribution (min {MIN_IMAGES_PER_CLASS} images):")
+    final_classes = []
+    for cls, count in sorted(class_image_counts.items(), key=lambda x: -x[1]):
+        if count >= MIN_IMAGES_PER_CLASS:
+            print(f"    {cls}: {count} images [KEEP]")
+            final_classes.append(cls)
+        else:
+            print(f"    {cls}: {count} images [DROP]")
+
+    if not final_classes:
+        print("\n  ERROR: No classes have enough images!")
+        return None
+
+    final_classes = sorted(final_classes)
+    print(f"\n  Final classes: {final_classes}")
+
+    # Phase 4: Merge with deduplication
+    print("\n  Merging...")
     job_dir = Path('./jobs') / job_id
     dataset_dir = job_dir / 'dataset'
+
+    if dataset_dir.exists():
+        shutil.rmtree(dataset_dir)
 
     for split in ['train', 'valid']:
         (dataset_dir / split / 'images').mkdir(parents=True, exist_ok=True)
         (dataset_dir / split / 'labels').mkdir(parents=True, exist_ok=True)
 
     image_hashes = {}
-    stats = {'images': 0, 'duplicates': 0}
+    stats = {'images': 0, 'annotations': 0, 'duplicates': 0, 'dropped': 0}
 
     for ds_info in dataset_configs:
         ds_path = ds_info['path']
-        ds_classes = ds_info['classes']
+        norm_classes = ds_info['normalized_classes']
 
-        class_remap = {i: unified_classes.index(cls) for i, cls in enumerate(ds_classes)}
+        # Build remap: old_id -> new_id (or None if dropped)
+        class_remap = {}
+        for i, norm in enumerate(norm_classes):
+            if norm and norm in final_classes:
+                class_remap[i] = final_classes.index(norm)
+            else:
+                class_remap[i] = None
 
         for split in ['train', 'valid']:
             img_dir = ds_path / split / 'images'
@@ -374,6 +457,7 @@ def merge_datasets(dataset_paths, job_id):
                 if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png', '.webp']:
                     continue
 
+                # Deduplicate by hash
                 img_hash = hashlib.md5(img_path.read_bytes()).hexdigest()
                 if img_hash in image_hashes:
                     stats['duplicates'] += 1
@@ -383,36 +467,51 @@ def merge_datasets(dataset_paths, job_id):
                 if not lbl_path.exists():
                     continue
 
+                # Remap annotations
                 new_lines = []
                 for line in lbl_path.read_text().strip().split('\n'):
                     if not line.strip():
                         continue
                     parts = line.split()
                     old_id = int(parts[0])
-                    parts[0] = str(class_remap[old_id])
-                    new_lines.append(' '.join(parts))
+                    new_id = class_remap.get(old_id)
+                    if new_id is not None:
+                        parts[0] = str(new_id)
+                        new_lines.append(' '.join(parts))
+                    else:
+                        stats['dropped'] += 1
 
                 if not new_lines:
                     continue
 
-                prefix = ds_path.name.replace(' ', '_')
-                shutil.copy(img_path, dataset_dir / split / 'images' / f"{prefix}_{img_path.name}")
-                (dataset_dir / split / 'labels' / f"{prefix}_{img_path.stem}.txt").write_text('\n'.join(new_lines))
+                # Save with dataset prefix
+                prefix = ds_path.name.replace(' ', '_').replace('/', '_')
+                new_img_name = f"{prefix}_{img_path.name}"
+                new_lbl_name = f"{prefix}_{img_path.stem}.txt"
 
-                image_hashes[img_hash] = True
+                shutil.copy(img_path, dataset_dir / split / 'images' / new_img_name)
+                (dataset_dir / split / 'labels' / new_lbl_name).write_text('\n'.join(new_lines))
+
+                image_hashes[img_hash] = new_img_name
                 stats['images'] += 1
+                stats['annotations'] += len(new_lines)
 
+    # Write data.yaml
     with open(dataset_dir / 'data.yaml', 'w') as f:
         yaml.dump({
             'path': '.',
             'train': 'train/images',
             'val': 'valid/images',
-            'nc': len(unified_classes),
-            'names': unified_classes,
+            'nc': len(final_classes),
+            'names': final_classes,
         }, f, default_flow_style=False)
 
-    print(f"  Images: {stats['images']} (removed {stats['duplicates']} duplicates)")
-    print(f"  Created: {job_dir}")
+    print(f"\n  Result:")
+    print(f"    Images: {stats['images']}")
+    print(f"    Annotations: {stats['annotations']}")
+    print(f"    Duplicates removed: {stats['duplicates']}")
+    print(f"    Annotations dropped: {stats['dropped']}")
+    print(f"    Classes: {final_classes}")
 
     return job_dir
 
