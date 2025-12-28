@@ -517,25 +517,26 @@ def process_datasets(dataset_paths, job_id):
 
 
 def upload_to_s3(job_dir, bucket, job_id):
-    """Upload job to S3 (including train.py)."""
-    s3 = boto3.client('s3')
-
+    """Upload job to S3 using aws s3 sync (parallel uploads)."""
     print(f"\nUploading to s3://{bucket}/jobs/{job_id}/")
 
-    count = 0
-    for path in job_dir.rglob('*'):
-        if path.is_file():
-            key = f"jobs/{job_id}/{path.relative_to(job_dir)}"
-            s3.upload_file(str(path), bucket, key)
-            count += 1
-
-    # Upload train.py with job (self-contained)
+    # Copy train.py into job_dir so it syncs with everything
     train_py = Path(__file__).parent / 'train.py'
     if train_py.exists():
-        s3.upload_file(str(train_py), bucket, f"jobs/{job_id}/train.py")
-        count += 1
+        shutil.copy(train_py, job_dir / 'train.py')
 
-    print(f"  Uploaded {count} files")
+    # Use aws s3 sync for parallel uploads
+    cmd = [
+        'aws', 's3', 'sync',
+        str(job_dir),
+        f's3://{bucket}/jobs/{job_id}/',
+        '--only-show-errors'
+    ]
+    subprocess.run(cmd, check=True)
+
+    # Count files for confirmation
+    count = sum(1 for _ in job_dir.rglob('*') if _.is_file())
+    print(f"  Synced {count} files")
 
 
 def create_spot_request(job_id, instance_type, bucket, infra):
