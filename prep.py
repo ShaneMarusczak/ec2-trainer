@@ -540,8 +540,8 @@ def process_datasets(dataset_paths, job_id):
                 if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png', '.webp']:
                     continue
 
-                # Deduplicate by hash
-                img_hash = hashlib.md5(img_path.read_bytes()).hexdigest()
+                # Deduplicate by hash (not for security, just dedup)
+                img_hash = hashlib.md5(img_path.read_bytes(), usedforsecurity=False).hexdigest()
                 if img_hash in image_hashes:
                     stats['duplicates'] += 1
                     continue
@@ -589,7 +589,7 @@ def process_datasets(dataset_paths, job_id):
             'names': final_classes,
         }, f, default_flow_style=False)
 
-    print(f"\n  Result:")
+    print("\n  Result:")
     print(f"    Images: {stats['images']}")
     print(f"    Annotations: {stats['annotations']}")
     print(f"    Duplicates removed: {stats['duplicates']}")
