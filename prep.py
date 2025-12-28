@@ -7,13 +7,21 @@ Usage:
 """
 
 import base64
-import shutil
 import hashlib
+import shutil
 import subprocess
 import sys
-import yaml
-import boto3
 from pathlib import Path
+
+# Auto-install dependencies
+for pkg, imp in [('boto3', 'boto3'), ('pyyaml', 'yaml')]:
+    try:
+        __import__(imp)
+    except ImportError:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg, '-q'])
+
+import boto3
+import yaml
 
 CONFIG_FILE = Path.home() / '.ec2-trainer.yaml'
 DATASETS_DIR = Path('./datasets')

@@ -9,10 +9,20 @@ Usage:
 """
 
 import json
+import subprocess
+import sys
 import time
+from pathlib import Path
+
+# Auto-install dependencies
+for pkg, imp in [('boto3', 'boto3'), ('pyyaml', 'yaml')]:
+    try:
+        __import__(imp)
+    except ImportError:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg, '-q'])
+
 import boto3
 import yaml
-from pathlib import Path
 
 CONFIG_FILE = Path.home() / '.ec2-trainer.yaml'
 
