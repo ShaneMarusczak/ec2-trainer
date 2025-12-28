@@ -224,6 +224,12 @@ def download_roboflow(rf_string, infra):
         print("  Invalid format. Use rf:workspace/project or rf:workspace/project/version")
         return None
 
+    # Check if already downloaded
+    dest_path = DATASETS_DIR / f"{workspace}_{project}_v{version}"
+    if dest_path.exists() and (dest_path / 'data.yaml').exists():
+        print(f"  Already downloaded: {dest_path}")
+        return dest_path
+
     # Get API key
     api_key = infra.get('roboflow_api_key')
     if not api_key:
