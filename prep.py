@@ -241,44 +241,78 @@ def main():
 
 def load_infra_config():
     """Load or create infrastructure config, prompting for any missing fields."""
-    # Load existing config or start fresh
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE) as f:
-            config = yaml.safe_load(f) or {}
-        print(f"\nLoaded config from {CONFIG_FILE}")
-    else:
-        config = {}
-        print("\nFirst run - need AWS infrastructure config.")
-        print("(This will be saved to ~/.ec2-trainer.yaml)\n")
-
     # Define all fields: (key, prompt, required, default)
     fields = [
         ('efs_id', 'EFS ID (fs-xxxxx)', True, None),
         ('subnet_id', 'Subnet ID (subnet-xxxxx)', True, None),
         ('security_group_id', 'Security Group ID (sg-xxxxx)', True, None),
         ('iam_instance_profile', 'IAM Instance Profile name', True, None),
-        ('ami_id', 'AMI ID', False, 'ami-0ce8c5eb104aa745d'),
+        ('ami_id', 'AMI ID', False, 'ami-03d235ac935098e03'),
         ('key_name', 'EC2 Key Pair name (for SSH, optional)', False, None),
         ('ntfy_topic', 'ntfy.sh topic (for notifications, optional)', False, None),
     ]
 
-    # Prompt for any missing or empty fields
+    # Load existing config or start fresh
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            config = yaml.safe_load(f) or {}
+        print(f"\nLoaded config from {CONFIG_FILE}")
+
+        # Show current config and offer to update
+        print("\nCurrent config:")
+        for i, (key, prompt, req, default) in enumerate(fields, 1):
+            val = config.get(key) or '(not set)'
+            print(f"  {i}. {key}: {val}")
+
+        print("\nUpdate config sections? (enter numbers like 1,3,5 or 'all', or press Enter to skip)")
+        choice = input("> ").strip().lower()
+
+        if choice:
+            # Parse which fields to update
+            if choice == 'all':
+                to_update = set(range(len(fields)))
+            else:
+                to_update = set()
+                for part in choice.replace(' ', '').split(','):
+                    if '-' in part:
+                        start, end = part.split('-')
+                        to_update.update(range(int(start) - 1, int(end)))
+                    elif part.isdigit():
+                        to_update.add(int(part) - 1)
+
+            # Prompt for selected fields
+            for i in sorted(to_update):
+                if 0 <= i < len(fields):
+                    key, prompt, required, default = fields[i]
+                    current = config.get(key)
+                    if current:
+                        prompt = f"{prompt} [{current}]"
+                    elif default:
+                        prompt = f"{prompt} [{default}]"
+                    value = input(f"{prompt}: ").strip()
+                    if value or not current:
+                        config[key] = value or current or default
+
+            with open(CONFIG_FILE, 'w') as f:
+                yaml.dump(config, f)
+            print(f"\nSaved to {CONFIG_FILE}")
+    else:
+        config = {}
+        print("\nFirst run - need AWS infrastructure config.")
+        print("(This will be saved to ~/.ec2-trainer.yaml)\n")
+
+    # Prompt for any missing fields
     updated = False
     for key, prompt, required, default in fields:
         current = config.get(key)
-        if current is None and not required:
-            # Optional field not set - prompt for it
+        if current is None:
             if default:
                 prompt = f"{prompt} [{default}]"
             value = input(f"{prompt}: ").strip()
+            if required:
+                while not value and not default:
+                    value = input(f"{prompt}: ").strip()
             config[key] = value or default
-            updated = True
-        elif current is None and required:
-            # Required field not set - prompt until we get a value
-            value = input(f"{prompt}: ").strip()
-            while not value:
-                value = input(f"{prompt}: ").strip()
-            config[key] = value
             updated = True
 
     # Save if we added anything
