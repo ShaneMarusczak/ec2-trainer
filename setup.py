@@ -9,10 +9,20 @@ Usage:
 """
 
 import json
+import subprocess
+import sys
 import time
+from pathlib import Path
+
+# Auto-install dependencies
+for pkg, imp in [('boto3', 'boto3'), ('pyyaml', 'yaml')]:
+    try:
+        __import__(imp)
+    except ImportError:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg, '-q'])
+
 import boto3
 import yaml
-from pathlib import Path
 
 CONFIG_FILE = Path.home() / '.ec2-trainer.yaml'
 
@@ -215,7 +225,7 @@ def main():
         'subnet_id': subnet_id,
         'security_group_id': sg_id,
         'iam_instance_profile': 'yolo-trainer',
-        'ami_id': 'ami-0c7217cdde317cfec',
+        'ami_id': 'ami-0ce8c5eb104aa745d',  # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Ubuntu 22.04)
         'bucket': bucket_name,
     }
 
