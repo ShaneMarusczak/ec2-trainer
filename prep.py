@@ -91,14 +91,40 @@ def main():
 
     # Show existing jobs if we have a saved bucket
     saved_bucket = infra.get('bucket')
+    existing_jobs = []
     if saved_bucket:
-        list_jobs(saved_bucket)
+        existing_jobs = list_jobs(saved_bucket) or []
 
-    # Step 1: Job ID
-    print("\nJob ID (e.g., spaghetti-v1):")
+    # Step 1: Job ID - show menu if jobs exist
+    if existing_jobs:
+        print("\nExisting jobs:")
+        for i, (jid, info) in enumerate(existing_jobs, 1):
+            status = info['status']
+            if status == 'complete':
+                status_str = 'complete'
+            elif status == 'running':
+                status_str = f"running ({info.get('instance', '?')})"
+            elif status == 'starting':
+                status_str = 'starting...'
+            else:
+                status_str = 'pending'
+            print(f"  {i}. {jid}: {status_str}")
+        print("\nSelect job number or enter new name:")
+    else:
+        print("\nJob ID:")
+
     job_id = input("> ").strip()
     while not job_id or ' ' in job_id:
         job_id = input("> ").strip()
+
+    # If they entered a number, map to existing job
+    if job_id.isdigit():
+        idx = int(job_id) - 1
+        if 0 <= idx < len(existing_jobs):
+            job_id = existing_jobs[idx][0]
+        else:
+            print(f"Invalid selection. Enter 1-{len(existing_jobs)} or a new name.")
+            return
 
     # Check if job exists in S3 (if we have a bucket)
     if saved_bucket and job_exists(saved_bucket, job_id):
@@ -528,19 +554,8 @@ def list_jobs(bucket):
     except Exception:
         pass
 
-    # Display
-    print("\nExisting jobs:")
-    for job_id in sorted(jobs.keys()):
-        info = jobs[job_id]
-        status = info['status']
-        if status == 'complete':
-            print(f"  {job_id}: complete")
-        elif status == 'running':
-            print(f"  {job_id}: running ({info.get('instance', '?')})")
-        elif status == 'starting':
-            print(f"  {job_id}: starting...")
-        else:
-            print(f"  {job_id}: pending")
+    # Return sorted list for menu display
+    return [(job_id, jobs[job_id]) for job_id in sorted(jobs.keys())]
 
 
 def get_training_config():
