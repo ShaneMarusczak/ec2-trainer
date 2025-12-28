@@ -152,12 +152,14 @@ def main():
     datasets = []
 
     # Offer to reuse dataset if overwriting
+    reusing_merged = False
     if overwriting_job:
         print(f"\nReuse dataset from '{overwriting_job}'? [Y/n]")
         if input("> ").strip().lower() != 'n':
             reuse_path = Path('./jobs') / overwriting_job / 'dataset'
             if reuse_path.exists():
                 datasets.append(reuse_path)
+                reusing_merged = True
                 print(f"  Using dataset from {overwriting_job}")
             else:
                 print(f"  Dataset not found at {reuse_path}, enter manually")
@@ -223,16 +225,28 @@ def main():
                 classes = list(classes.values())
             print(f"  Added: {path.name} ({len(classes)} classes: {classes})")
 
-    # Step 3: Analyze datasets and select classes
-    dataset_configs, class_counts = analyze_datasets(datasets)
-    if not class_counts:
-        print("\nNo classes found in datasets!")
-        return
+    # If reusing merged dataset, skip analysis/selection/merge
+    if reusing_merged:
+        # Read classes from the merged dataset's data.yaml
+        with open(datasets[0] / 'data.yaml') as f:
+            config = yaml.safe_load(f)
+        final_classes = config.get('names', [])
+        if isinstance(final_classes, dict):
+            final_classes = list(final_classes.values())
+        job_dir = Path('./jobs') / job_id
+        dataset_configs = None  # Not needed
+    else:
+        # Step 3: Analyze datasets and select classes
+        dataset_configs, class_counts = analyze_datasets(datasets)
+        if not class_counts:
+            print("\nNo classes found in datasets!")
+            return
 
-    final_classes = select_classes(class_counts)
-    if not final_classes:
-        print("Cancelled.")
-        return
+        final_classes = select_classes(class_counts)
+        if not final_classes:
+            print("Cancelled.")
+            return
+        job_dir = None  # Will be created by merge
 
     # Step 4: Training config
     training_config = get_training_config()
@@ -244,7 +258,9 @@ def main():
     print("\n" + "=" * 60)
     print("  Summary")
     print("=" * 60)
-    if len(datasets) == 1:
+    if reusing_merged:
+        print(f"  Dataset:  {datasets[0].name} (reusing)")
+    elif len(datasets) == 1:
         print(f"  Dataset:  {datasets[0].name}")
     else:
         print(f"  Datasets: {len(datasets)} (will merge)")
@@ -261,11 +277,12 @@ def main():
         print("Cancelled.")
         return
 
-    # Step 7: Merge datasets (non-interactive)
-    job_dir = merge_datasets(dataset_configs, final_classes, job_id)
-    if not job_dir:
-        print("Failed to merge datasets.")
-        return
+    # Step 7: Merge datasets (skip if reusing)
+    if not reusing_merged:
+        job_dir = merge_datasets(dataset_configs, final_classes, job_id)
+        if not job_dir:
+            print("Failed to merge datasets.")
+            return
 
     # Write training config
     with open(job_dir / 'config.yaml', 'w') as f:
