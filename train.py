@@ -184,13 +184,13 @@ def main():
         # Pull dataset if needed
         pull_dataset_if_needed()
 
-        # Validate dataset structure
-        validate_dataset()
+        # Validate and fix dataset paths (generates fresh data.yaml)
+        data_yaml = validate_and_fix_dataset()
 
         # Get starting epoch
         start_epoch = read_epoch()
         print(f"Starting from epoch {start_epoch}")
-        
+
         # Start watchdog and spot interruption monitor
         stall_hours = config.get('stall_hours', 2)
         watchdog_thread = threading.Thread(
@@ -205,9 +205,9 @@ def main():
             daemon=True
         )
         spot_monitor.start()
-        
+
         # Train
-        metrics = train(config, start_epoch)
+        metrics = train(config, start_epoch, data_yaml)
         
         # Stop watchdog
         watchdog_stop.set()
@@ -294,34 +294,50 @@ def pull_dataset_if_needed():
     print(f"Dataset downloaded to {DATASET_DIR}")
 
 
-def validate_dataset():
-    """Validate dataset has required structure."""
-    # Debug: show dataset contents
+def validate_and_fix_dataset():
+    """Validate dataset and generate fresh data.yaml with correct paths."""
     print(f"Dataset directory: {DATASET_DIR}")
-    print(f"Contents: {list(DATASET_DIR.iterdir())}")
-    if (DATASET_DIR / 'train' / 'images').exists():
-        train_images = list((DATASET_DIR / 'train' / 'images').iterdir())
-        print(f"Train images: {len(train_images)} files")
-    if (DATASET_DIR / 'valid' / 'images').exists():
-        valid_images = list((DATASET_DIR / 'valid' / 'images').iterdir())
-        print(f"Valid images: {len(valid_images)} files")
 
+    # Check required directories exist
+    train_images_dir = DATASET_DIR / 'train' / 'images'
+    valid_images_dir = DATASET_DIR / 'valid' / 'images'
+
+    if not train_images_dir.exists():
+        raise FileNotFoundError(f"Missing: {train_images_dir}")
+    if not valid_images_dir.exists():
+        raise FileNotFoundError(f"Missing: {valid_images_dir}")
+
+    # Count images
+    train_images = list(train_images_dir.glob('*.[jJ][pP][gG]')) + list(train_images_dir.glob('*.[pP][nN][gG]'))
+    valid_images = list(valid_images_dir.glob('*.[jJ][pP][gG]')) + list(valid_images_dir.glob('*.[pP][nN][gG]'))
+    print(f"Train images: {len(train_images)}")
+    print(f"Valid images: {len(valid_images)}")
+
+    if len(train_images) == 0:
+        raise ValueError(f"No images found in {train_images_dir}")
+
+    # Read original data.yaml for class names only
     data_yaml = DATASET_DIR / 'data.yaml'
-    if not data_yaml.exists():
-        raise FileNotFoundError(
-            f"data.yaml not found at {data_yaml}. "
-            "Dataset must have data.yaml in root."
-        )
+    if data_yaml.exists():
+        with open(data_yaml) as f:
+            orig = yaml.safe_load(f)
+        names = orig.get('names', ['object'])
+    else:
+        names = ['object']  # Default if no data.yaml
 
-    with open(data_yaml) as f:
-        data_config = yaml.safe_load(f)
+    # Write fresh data.yaml with absolute paths
+    fresh_config = {
+        'path': str(DATASET_DIR.resolve()),
+        'train': str(train_images_dir.resolve()),
+        'val': str(valid_images_dir.resolve()),
+        'names': names,
+        'nc': len(names),
+    }
+    with open(data_yaml, 'w') as f:
+        yaml.dump(fresh_config, f)
 
-    required = ['names', 'train']
-    missing = [k for k in required if k not in data_config]
-    if missing:
-        raise ValueError(f"data.yaml missing required keys: {missing}")
-
-    print(f"Dataset validated: {len(data_config['names'])} classes")
+    print(f"Data config: {fresh_config}")
+    return data_yaml
 
 
 def read_epoch():
@@ -344,7 +360,7 @@ def write_epoch(epoch):
     tmp_file.replace(EPOCH_FILE)  # Atomic on POSIX
 
 
-def train(config, start_epoch):
+def train(config, start_epoch, data_yaml):
     """Run YOLO training."""
     from ultralytics import YOLO
 
@@ -359,25 +375,6 @@ def train(config, start_epoch):
     else:
         print(f"Starting fresh with {model_name}")
         model = YOLO(model_name)
-
-    # data.yaml must be in standard location (validated earlier)
-    data_yaml = DATASET_DIR / 'data.yaml'
-
-    # Read original config for names/nc only
-    with open(data_yaml) as f:
-        data_config = yaml.safe_load(f)
-
-    # Force correct absolute paths (don't trust cached values)
-    base_path = str(data_yaml.parent.resolve())
-    data_config['path'] = base_path
-    data_config['train'] = f"{base_path}/train/images"
-    data_config['val'] = f"{base_path}/valid/images"
-
-    # Write back
-    with open(data_yaml, 'w') as f:
-        yaml.dump(data_config, f)
-
-    print(f"Data config: {data_config}")
 
     # Epoch tracking callback
     def on_train_epoch_end(trainer):
