@@ -363,21 +363,17 @@ def train(config, start_epoch):
     # data.yaml must be in standard location (validated earlier)
     data_yaml = DATASET_DIR / 'data.yaml'
 
-    # Update data.yaml with absolute paths
+    # Read original config for names/nc only
     with open(data_yaml) as f:
         data_config = yaml.safe_load(f)
 
-    # Make all paths absolute
-    base_path = data_yaml.parent
-    data_config['path'] = str(base_path)
-    # Also make train/val absolute to avoid YOLO looking in wrong places
-    if 'train' in data_config:
-        train_path = base_path / data_config['train']
-        data_config['train'] = str(train_path)
-    if 'val' in data_config:
-        val_path = base_path / data_config['val']
-        data_config['val'] = str(val_path)
+    # Force correct absolute paths (don't trust cached values)
+    base_path = str(data_yaml.parent.resolve())
+    data_config['path'] = base_path
+    data_config['train'] = f"{base_path}/train/images"
+    data_config['val'] = f"{base_path}/valid/images"
 
+    # Write back
     with open(data_yaml, 'w') as f:
         yaml.dump(data_config, f)
 
