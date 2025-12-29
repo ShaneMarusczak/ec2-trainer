@@ -289,9 +289,10 @@ def main():
             print("Failed to merge datasets.")
             return
 
-    # Write training config
+    # Write training config (exclude launch-only keys)
+    yolo_config = {k: v for k, v in training_config.items() if k not in ('use_spot', 'instance_type')}
     with open(job_dir / 'config.yaml', 'w') as f:
-        yaml.dump(training_config, f, default_flow_style=False)
+        yaml.dump(yolo_config, f, default_flow_style=False)
 
     # Step 8: Upload to S3
     upload_to_s3(job_dir, bucket, job_id)
