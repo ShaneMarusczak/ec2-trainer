@@ -389,15 +389,36 @@ def write_epoch(epoch):
     tmp_file.replace(EPOCH_FILE)  # Atomic on POSIX
 
 
-def train(config, start_epoch, data_yaml):
-    """Run YOLO training."""
-    from ultralytics import YOLO
+def get_model_class(model_name):
+    """Get the appropriate Ultralytics model class for the model name."""
+    model_lower = model_name.lower()
+    if 'rtdetr' in model_lower:
+        from ultralytics import RTDETR
+        return RTDETR
+    elif 'sam' in model_lower:
+        from ultralytics import SAM
+        return SAM
+    elif 'fastsam' in model_lower:
+        from ultralytics import FastSAM
+        return FastSAM
+    elif 'nas' in model_lower:
+        from ultralytics import NAS
+        return NAS
+    else:
+        from ultralytics import YOLO
+        return YOLO
 
+
+def train(config, start_epoch, data_yaml):
+    """Run training with any Ultralytics model."""
     # Load model
     model_name = config.get('model', 'yolo12m.pt')
     total_epochs = config.get('epochs', 120)
     patience = config.get('patience', TRAIN_DEFAULTS['patience'])
     gpu_info = get_gpu_info()
+
+    # Get appropriate model class
+    ModelClass = get_model_class(model_name)
 
     # Track training start time
     training_start_time = time.time()
@@ -406,11 +427,11 @@ def train(config, start_epoch, data_yaml):
     if start_epoch > 0 and CHECKPOINT_FILE.exists():
         print(f"Resuming from checkpoint at epoch {start_epoch}")
         ntfy(f"🔄 [{JOB_ID}] Resuming from epoch {start_epoch}/{total_epochs} on {gpu_info}")
-        model = YOLO(str(CHECKPOINT_FILE))
+        model = ModelClass(str(CHECKPOINT_FILE))
     else:
         print(f"Starting fresh with {model_name}")
         ntfy(f"🏋️ [{JOB_ID}] Training starting: {model_name}, {total_epochs} epochs on {gpu_info}")
-        model = YOLO(model_name)
+        model = ModelClass(model_name)
 
     # Epoch tracking callback
     def on_train_epoch_end(trainer):
