@@ -363,12 +363,25 @@ def train(config, start_epoch):
     # data.yaml must be in standard location (validated earlier)
     data_yaml = DATASET_DIR / 'data.yaml'
 
-    # Update data.yaml path to be absolute
+    # Update data.yaml with absolute paths
     with open(data_yaml) as f:
         data_config = yaml.safe_load(f)
-    data_config['path'] = str(data_yaml.parent)
+
+    # Make all paths absolute
+    base_path = data_yaml.parent
+    data_config['path'] = str(base_path)
+    # Also make train/val absolute to avoid YOLO looking in wrong places
+    if 'train' in data_config:
+        train_path = base_path / data_config['train']
+        data_config['train'] = str(train_path)
+    if 'val' in data_config:
+        val_path = base_path / data_config['val']
+        data_config['val'] = str(val_path)
+
     with open(data_yaml, 'w') as f:
         yaml.dump(data_config, f)
+
+    print(f"Data config: {data_config}")
 
     # Epoch tracking callback
     def on_train_epoch_end(trainer):
