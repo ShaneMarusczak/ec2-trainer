@@ -625,15 +625,82 @@ def get_training_config():
     epochs = int(input("\n  Epochs [120]: ").strip() or "120")
     batch = int(input("  Batch [16]: ").strip() or "16")
 
-    return {
+    config = {
         'model': model,
         'instance_type': instance_type,
         'use_spot': use_spot,
         'epochs': epochs,
         'batch': batch,
-        'imgsz': 640,
-        'patience': 20,
     }
+
+    # Advanced options
+    print("\n  Advanced options? [y/N]: ", end="")
+    if input().strip().lower() == 'y':
+        advanced = get_advanced_config()
+        config.update(advanced)
+
+    return config
+
+
+# Advanced training parameters with defaults and descriptions
+ADVANCED_PARAMS = [
+    ('lr0', 0.001, 'Initial learning rate'),
+    ('imgsz', 640, 'Image size'),
+    ('patience', 20, 'Early stopping patience (epochs)'),
+    ('optimizer', 'AdamW', 'Optimizer (SGD, Adam, AdamW)'),
+    ('warmup_epochs', 5, 'Warmup epochs'),
+    ('dropout', 0.1, 'Dropout rate'),
+    ('mosaic', 1.0, 'Mosaic augmentation (0-1)'),
+    ('mixup', 0.15, 'Mixup augmentation (0-1)'),
+    ('degrees', 15, 'Rotation degrees'),
+    ('scale', 0.5, 'Scale augmentation'),
+    ('close_mosaic', 10, 'Disable mosaic last N epochs'),
+]
+
+
+def get_advanced_config():
+    """Prompt for advanced training parameters."""
+    print("\n  Advanced parameters (press Enter to keep default):\n")
+
+    # Show all params with numbers
+    for i, (name, default, desc) in enumerate(ADVANCED_PARAMS, 1):
+        print(f"    {i:2}. {name}: {default} ({desc})")
+
+    print("\n  Enter numbers to modify (e.g., '1 3 5' or 'all'), or Enter to skip:")
+    selection = input("  > ").strip().lower()
+
+    if not selection:
+        return {}
+
+    # Parse selection
+    if selection == 'all':
+        indices = list(range(len(ADVANCED_PARAMS)))
+    else:
+        try:
+            indices = [int(x) - 1 for x in selection.split() if x.isdigit()]
+            indices = [i for i in indices if 0 <= i < len(ADVANCED_PARAMS)]
+        except ValueError:
+            return {}
+
+    if not indices:
+        return {}
+
+    # Prompt for selected params
+    config = {}
+    print()
+    for idx in indices:
+        name, default, desc = ADVANCED_PARAMS[idx]
+        value = input(f"    {name} [{default}]: ").strip()
+        if value:
+            # Parse value based on type of default
+            if isinstance(default, float):
+                config[name] = float(value)
+            elif isinstance(default, int):
+                config[name] = int(value)
+            else:
+                config[name] = value
+
+    return config
 
 
 def normalize_class(cls):
