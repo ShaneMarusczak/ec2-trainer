@@ -1002,6 +1002,11 @@ ntfy "✅ [{job_id}] Job complete - shutting down"
 
     user_data_b64 = base64.b64encode(user_data.encode()).decode()
 
+    # Save user_data for debugging
+    debug_script = Path('./jobs') / job_id / 'user_data.sh'
+    debug_script.write_text(user_data)
+    print(f"\n  Debug: user_data saved to {debug_script}")
+
     # Common instance config
     instance_config = {
         'ImageId': infra['ami_id'],
