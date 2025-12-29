@@ -603,20 +603,18 @@ def get_training_config():
     """Get training configuration."""
     print("\nTraining config:\n")
 
-    # Model: YOLO shorthand (12m, 11s) or full name (rtdetr-l, yolov8n)
-    print("  Model (e.g., 12m, 11s, rtdetr-l, rtdetr-x):")
-    model_input = input("  [12m]: ").strip().lower() or "12m"
+    # Model: any Ultralytics model name
+    # Shortcuts: 12m->yolo12m, 11s->yolo11s, etc.
+    # Full names: rtdetr-l, yolov8n, yolo-world, sam, etc.
+    print("  Model (shortcuts: 12m, 11s | full: rtdetr-l, yolov8n, yolo-world):")
+    model_input = input("  [yolo12m]: ").strip() or "yolo12m"
 
-    # Check if it's a known non-YOLO model or already has .pt
-    if model_input.startswith(('rtdetr', 'yolov', 'yolo_')) or '.pt' in model_input:
-        model = model_input if model_input.endswith('.pt') else f"{model_input}.pt"
-    else:
-        # Parse as YOLO shorthand: "12m" -> "yolo12m.pt"
-        gen = ''.join(c for c in model_input if c.isdigit()) or '12'
-        size = ''.join(c for c in model_input if c.isalpha()) or 'm'
-        if size not in ['n', 's', 'm', 'l', 'x']:
-            size = 'm'
-        model = f"yolo{gen}{size}.pt"
+    # Expand shortcuts like "12m" -> "yolo12m"
+    if len(model_input) <= 3 and model_input[0].isdigit():
+        model_input = f"yolo{model_input}"
+
+    # Add .pt extension if missing
+    model = model_input if model_input.endswith('.pt') else f"{model_input}.pt"
 
     print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge, p3.2xlarge):")
     instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
