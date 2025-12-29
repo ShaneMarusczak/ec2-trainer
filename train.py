@@ -236,8 +236,12 @@ def main():
 
     except Exception as e:
         watchdog_stop.set()
-        print(f"{JOB_ID} failed: {str(e)[:100]}")
-        ntfy(f"❌ [{JOB_ID}] Training failed: {str(e)[:80]}")
+        error_msg = str(e)
+        print(f"{JOB_ID} failed: {error_msg}")
+        # Send full error in multiple ntfy messages if needed
+        ntfy(f"❌ [{JOB_ID}] Training failed: {error_msg[:200]}")
+        if len(error_msg) > 200:
+            ntfy(f"...{error_msg[200:400]}")
         # Mark clean exit (we handled it) and terminate
         _clean_exit = True
         cleanup_and_terminate()
@@ -292,6 +296,16 @@ def pull_dataset_if_needed():
 
 def validate_dataset():
     """Validate dataset has required structure."""
+    # Debug: show dataset contents
+    print(f"Dataset directory: {DATASET_DIR}")
+    print(f"Contents: {list(DATASET_DIR.iterdir())}")
+    if (DATASET_DIR / 'train' / 'images').exists():
+        train_images = list((DATASET_DIR / 'train' / 'images').iterdir())
+        print(f"Train images: {len(train_images)} files")
+    if (DATASET_DIR / 'valid' / 'images').exists():
+        valid_images = list((DATASET_DIR / 'valid' / 'images').iterdir())
+        print(f"Valid images: {len(valid_images)} files")
+
     data_yaml = DATASET_DIR / 'data.yaml'
     if not data_yaml.exists():
         raise FileNotFoundError(
