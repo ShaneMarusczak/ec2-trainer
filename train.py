@@ -116,7 +116,7 @@ TRAIN_DEFAULTS = {
     'workers': 8,
     'close_mosaic': 10,
     'copy_paste': 0.3,
-    'save_period': 10,
+    'save_period': -1,  # Only save best.pt and last.pt
 }
 
 
