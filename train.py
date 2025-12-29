@@ -39,7 +39,6 @@ def get_required_env(key):
 # Environment variables (set by user data)
 JOB_ID = get_required_env('JOB_ID')
 S3_BUCKET = get_required_env('S3_BUCKET')
-EFS_ID = get_required_env('EFS_ID')
 NTFY_TOPIC = os.environ.get('NTFY_TOPIC', '')
 
 
@@ -56,14 +55,12 @@ def ntfy(message):
     except Exception:
         pass  # Don't fail training on notification errors
 
-# Paths
-EFS_ROOT = Path('/mnt/efs')
-JOB_DIR = EFS_ROOT / JOB_ID
-EPOCH_FILE = JOB_DIR / 'epoch.txt'
-DATASET_DIR = JOB_DIR / 'dataset'
-LOCAL_WEIGHTS_DIR = JOB_DIR / 'weights'
-# YOLO saves checkpoints here
-CHECKPOINT_FILE = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'last.pt'
+# Local paths (everything on instance storage, synced to/from S3)
+WORK_DIR = Path('/home/ubuntu/training')
+DATASET_DIR = WORK_DIR / 'dataset'
+WEIGHTS_DIR = WORK_DIR / 'weights'
+CHECKPOINT_FILE = WEIGHTS_DIR / 'train' / 'weights' / 'last.pt'
+EPOCH_FILE = WORK_DIR / 'epoch.txt'
 
 # AWS clients with retry config
 s3_config = Config(
@@ -175,8 +172,8 @@ def main():
             cleanup_and_terminate()
             return
         
-        # Setup job directory
-        JOB_DIR.mkdir(parents=True, exist_ok=True)
+        # Setup work directory
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
         
         # Pull config
         config = pull_config()
@@ -229,7 +226,7 @@ def main():
         watchdog_stop.set()
         print(f"{JOB_ID} failed: NaN at epoch {e.epoch}")
         ntfy(f"❌ [{JOB_ID}] Training failed: NaN detected at epoch {e.epoch}")
-        cleanup_efs()
+        cleanup_local()
         # Mark clean exit (we handled it) and terminate
         _clean_exit = True
         cleanup_and_terminate()
@@ -275,7 +272,7 @@ def pull_config():
 def pull_dataset_if_needed():
     """Download dataset from S3 if not already present."""
     if DATASET_DIR.exists() and any(DATASET_DIR.iterdir()):
-        print("Dataset already present in EFS")
+        print("Dataset already present locally")
         return
 
     print("Pulling dataset from S3...")
@@ -405,7 +402,7 @@ def train(config, start_epoch, data_yaml):
     # Override/add computed values
     train_args.update({
         'data': str(data_yaml),
-        'project': str(LOCAL_WEIGHTS_DIR),
+        'project': str(WEIGHTS_DIR),
         'name': 'train',
         'exist_ok': True,
     })
@@ -441,7 +438,7 @@ def train(config, start_epoch, data_yaml):
 def upload_weights(config, metrics):
     """Upload trained weights and results to S3."""
     # best.pt is always in YOLO's output location
-    best_pt = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'best.pt'
+    best_pt = WEIGHTS_DIR / 'train' / 'weights' / 'best.pt'
 
     if best_pt.exists():
         s3.upload_file(str(best_pt), S3_BUCKET, f"weights/{JOB_ID}/best.pt")
@@ -494,7 +491,7 @@ def spot_interruption_monitor():
 
 def watchdog(stall_hours):
     """Monitor training progress via checkpoint file mtime."""
-    checkpoint = LOCAL_WEIGHTS_DIR / 'train' / 'weights' / 'last.pt'
+    checkpoint = WEIGHTS_DIR / 'train' / 'weights' / 'last.pt'
 
     while not watchdog_stop.is_set():
         time.sleep(600)  # Check every 10 minutes
@@ -513,20 +510,20 @@ def watchdog(stall_hours):
                 if age_hours > stall_hours:
                     print(f"{JOB_ID} stalled - no checkpoint update in {age_hours:.1f}h")
                     ntfy(f"⚠️ [{JOB_ID}] Training stalled - no progress in {age_hours:.1f}h, terminating")
-                    cleanup_efs()
+                    cleanup_local()
                     cleanup_and_terminate()
         except Exception as e:
             print(f"Watchdog error: {e}")
 
 
-def cleanup_efs():
-    """Remove job directory from EFS."""
+def cleanup_local():
+    """Remove work directory (instance terminates anyway, but be tidy)."""
     try:
-        if JOB_DIR.exists():
-            shutil.rmtree(JOB_DIR)
-            print(f"Cleaned up EFS: {JOB_DIR}")
+        if WORK_DIR.exists():
+            shutil.rmtree(WORK_DIR)
+            print(f"Cleaned up: {WORK_DIR}")
     except Exception as e:
-        print(f"Failed to cleanup EFS: {e}")
+        print(f"Failed to cleanup: {e}")
 
 
 def cleanup_and_terminate():

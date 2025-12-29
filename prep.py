@@ -311,7 +311,6 @@ def load_infra_config():
     """Load or create infrastructure config, prompting for any missing fields."""
     # Define all fields: (key, prompt, required, default)
     fields = [
-        ('efs_id', 'EFS ID (fs-xxxxx)', True, None),
         ('subnet_id', 'Subnet ID (subnet-xxxxx)', True, None),
         ('security_group_id', 'Security Group ID (sg-xxxxx)', True, None),
         ('iam_instance_profile', 'IAM Instance Profile name', True, None),
@@ -917,7 +916,6 @@ set -e  # Exit on error
 
 export JOB_ID="{job_id}"
 export S3_BUCKET="{bucket}"
-export EFS_ID="{infra['efs_id']}"
 export NTFY_TOPIC="{ntfy_topic}"
 
 # ntfy notification helper
@@ -948,38 +946,18 @@ trap '
     fi
 ' EXIT
 
-# Max runtime failsafe - 12 hours absolute limit (belt + suspenders + parachute)
+# Max runtime failsafe - 12 hours absolute limit
 (sleep 43200 && ntfy "⏰ [{job_id}] Max runtime (12h) reached - terminating" && \
     aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION") &
 
-# Self-terminate on fatal error (with specific message)
+# Self-terminate on fatal error
 terminate() {{
-    ntfy "💀 [{job_id}] Fatal error, self-terminating: $1"
+    ntfy "💀 [{job_id}] Fatal error: $1"
     aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION" || true
     exit 1
 }}
 
-# Install NFS utils if needed
-if ! command -v mount.nfs4 &> /dev/null; then
-    apt-get update -qq && apt-get install -y -qq nfs-common || terminate "Failed to install nfs-common"
-fi
-
-# Mount EFS via NFS4 with retry
-mkdir -p /mnt/efs
-EFS_DNS="{infra['efs_id']}.efs.$REGION.amazonaws.com"
-for i in 1 2 3 4 5; do
-    mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 "$EFS_DNS":/ /mnt/efs && break
-    echo "EFS mount attempt $i failed, retrying in 10s..."
-    sleep 10
-done
-
-# Verify mount
-if ! mountpoint -q /mnt/efs; then
-    terminate "EFS mount failed after 5 attempts"
-fi
-ntfy "✓ [{job_id}] EFS mounted"
-
-# Activate PyTorch env (try venv first, then conda for older AMIs)
+# Activate PyTorch env
 if [ -f /opt/pytorch/bin/activate ]; then
     source /opt/pytorch/bin/activate
 elif [ -f /opt/conda/bin/activate ]; then
@@ -987,18 +965,19 @@ elif [ -f /opt/conda/bin/activate ]; then
 else
     terminate "No PyTorch environment found"
 fi
-pip install -q ultralytics boto3 pyyaml requests || terminate "Failed to install pip dependencies"
-ntfy "✓ [{job_id}] Dependencies installed"
+
+pip install -q ultralytics boto3 pyyaml requests || terminate "pip install failed"
+ntfy "✓ [{job_id}] Dependencies ready"
 
 # Download and run trainer
-aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py || terminate "Failed to download train.py from S3"
+aws s3 cp s3://{bucket}/jobs/{job_id}/train.py /home/ubuntu/train.py || terminate "Failed to download train.py"
 cd /home/ubuntu
 export AWS_DEFAULT_REGION=$REGION
-python train.py || terminate "Training script failed"
+python train.py || terminate "Training failed"
 
-# If we get here, everything succeeded
+# Success
 CLEAN_EXIT=true
-ntfy "✅ [{job_id}] Job complete - shutting down"
+ntfy "✅ [{job_id}] Complete"
 """
 
     user_data_b64 = base64.b64encode(user_data.encode()).decode()
