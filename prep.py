@@ -184,6 +184,7 @@ def main():
     if not datasets:
         print("\nDatasets (Enter when done):")
         print("  - Local path: ~/datasets/my-dataset")
+        print("  - All local:  all  (use all in ./datasets/)")
         print("  - Roboflow:   rf:workspace/project/version")
         print("  - Previous:   job:<job_id>  (reuse merged dataset)")
         print("  - Reset key:  rf:reset")
@@ -199,10 +200,24 @@ def main():
                     continue
                 break
 
-            # Check if Roboflow or previous job
+            # Check for special commands
             if user_input.lower() == 'rf:reset':
                 reset_roboflow_key(infra)
                 continue
+            elif user_input.lower() == 'all':
+                # Add all datasets in ./datasets/
+                if not DATASETS_DIR.exists():
+                    print(f"  {DATASETS_DIR} not found")
+                    continue
+                subdirs = sorted([d for d in DATASETS_DIR.iterdir() if d.is_dir() and (d / 'data.yaml').exists()])
+                if not subdirs:
+                    print(f"  No datasets with data.yaml found in {DATASETS_DIR}")
+                    continue
+                for subdir in subdirs:
+                    datasets.append(subdir)
+                    print(f"  Added: {subdir.name}")
+                print(f"  Total: {len(subdirs)} datasets")
+                break
             elif user_input.startswith('rf:'):
                 path = download_roboflow(user_input, infra)
                 if not path:
