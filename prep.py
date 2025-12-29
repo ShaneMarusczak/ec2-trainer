@@ -921,7 +921,7 @@ export NTFY_TOPIC="{ntfy_topic}"
 
 # ntfy notification helper
 ntfy() {{
-    [ -n "$NTFY_TOPIC" ] && curl -s -d "$1" "ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1 || true
+    [ -n "$NTFY_TOPIC" ] && curl -s -d "$1" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1 || true
 }}
 
 # Log everything to S3 for debugging
