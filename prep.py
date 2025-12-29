@@ -647,12 +647,13 @@ def get_training_config():
 
 # Advanced training parameters with defaults and descriptions
 ADVANCED_PARAMS = [
-    ('lr0', 0.001, 'Initial learning rate'),
+    ('lr0', 0.001, 'Initial learning rate (0.01 for RT-DETR)'),
     ('imgsz', 640, 'Image size'),
     ('patience', 20, 'Early stopping patience (epochs)'),
     ('optimizer', 'AdamW', 'Optimizer (SGD, Adam, AdamW)'),
     ('warmup_epochs', 5, 'Warmup epochs'),
     ('dropout', 0.1, 'Dropout rate'),
+    ('amp', True, 'Mixed precision (False for RT-DETR if NaN)'),
     ('mosaic', 1.0, 'Mosaic augmentation (0-1)'),
     ('mixup', 0.15, 'Mixup augmentation (0-1)'),
     ('degrees', 15, 'Rotation degrees'),
@@ -696,7 +697,9 @@ def get_advanced_config():
         value = input(f"    {name} [{default}]: ").strip()
         if value:
             # Parse value based on type of default
-            if isinstance(default, float):
+            if isinstance(default, bool):
+                config[name] = value.lower() in ('true', '1', 'yes', 'y')
+            elif isinstance(default, float):
                 config[name] = float(value)
             elif isinstance(default, int):
                 config[name] = int(value)
