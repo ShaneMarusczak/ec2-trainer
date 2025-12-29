@@ -568,9 +568,15 @@ def get_metadata(path):
                 headers={'X-aws-ec2-metadata-token': token},
                 timeout=2
             )
-            return response.text
+            # Only return on success - 404 means metadata not available
+            if response.status_code == 200:
+                return response.text
+            return None
         # Fall back to IMDSv1
-        return requests.get(url, timeout=2).text
+        response = requests.get(url, timeout=2)
+        if response.status_code == 200:
+            return response.text
+        return None
     except requests.RequestException:
         return None
 
