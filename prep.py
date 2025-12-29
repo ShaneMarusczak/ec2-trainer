@@ -3,8 +3,11 @@
 EC2 YOLO Training - Dataset prep and job launcher.
 
 Usage:
-    python prep.py
+    python prep.py              # Normal run
+    python prep.py --reset      # Wipe config and start fresh
     python prep.py --reset-roboflow-key
+    python prep.py --set-ntfy TOPIC
+    python prep.py --set-key KEY_NAME
 """
 
 import argparse
@@ -52,6 +55,8 @@ CLASS_UNIFICATION = {
 
 def main():
     parser = argparse.ArgumentParser(description='EC2 YOLO Training - Dataset prep and job launcher')
+    parser.add_argument('--reset', action='store_true',
+                        help='Wipe config and run setup wizard from scratch')
     parser.add_argument('--reset-roboflow-key', action='store_true',
                         help='Reset your Roboflow API key')
     parser.add_argument('--set-ntfy', metavar='TOPIC',
@@ -63,6 +68,14 @@ def main():
     print("=" * 60)
     print("  EC2 YOLO Training")
     print("=" * 60)
+
+    # Handle full config reset
+    if args.reset:
+        if CONFIG_FILE.exists():
+            CONFIG_FILE.unlink()
+            print("\nConfig wiped. Starting fresh setup...\n")
+        else:
+            print("\nNo config found. Starting fresh setup...\n")
 
     # Load or create infrastructure config
     infra = load_infra_config()
