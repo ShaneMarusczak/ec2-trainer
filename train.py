@@ -383,8 +383,8 @@ def train(config, start_epoch, data_yaml):
         if loss is not None and (math.isnan(loss) or loss > 100):
             raise NaNDetected(epoch)
 
-        # Send progress notification every 10 epochs
-        if epoch > 0 and epoch % 10 == 0:
+        # Send progress notification: epoch 1 (proof of life), then every 10
+        if epoch == 1 or (epoch > 0 and epoch % 10 == 0):
             loss_str = f"{float(loss):.3f}" if loss is not None else "?"
             ntfy(f"📊 [{JOB_ID}] Epoch {epoch}/{total_epochs} - loss: {loss_str}")
 
