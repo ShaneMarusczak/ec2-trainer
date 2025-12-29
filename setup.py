@@ -165,7 +165,7 @@ def main():
         'subnet_id': subnet_id,
         'security_group_id': sg_id,
         'iam_instance_profile': 'yolo-trainer',
-        'ami_id': 'ami-0ce8c5eb104aa745d',  # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Ubuntu 22.04)
+        'ami_id': 'ami-03d235ac935098e03',  # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Ubuntu 22.04)
     }
 
     with open(CONFIG_FILE, 'w') as f:
