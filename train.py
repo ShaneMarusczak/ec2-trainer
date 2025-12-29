@@ -215,8 +215,10 @@ def main():
         # Log completion
         recall = metrics.get('recall', 0)
         mAP50 = metrics.get('mAP50', 0)
-        print(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50")
-        ntfy(f"✅ [{JOB_ID}] Training complete! {recall:.1%} recall, {mAP50:.1%} mAP50")
+        training_time = metrics.get('training_time', 0)
+        time_str = format_duration(training_time) if training_time else "?"
+        print(f"{JOB_ID} complete: {recall:.1%} recall, {mAP50:.1%} mAP50 in {time_str}")
+        ntfy(f"✅ [{JOB_ID}] Complete in {time_str} - {recall:.1%} recall, {mAP50:.1%} mAP50")
 
         # Mark clean exit and terminate
         _clean_exit = True
@@ -334,7 +336,37 @@ def validate_and_fix_dataset():
         yaml.dump(fresh_config, f)
 
     print(f"Data config: {fresh_config}")
+
+    # Notify dataset stats
+    class_str = ', '.join(names) if len(names) <= 3 else f"{len(names)} classes"
+    ntfy(f"📁 [{JOB_ID}] Dataset: {len(train_images)} train / {len(valid_images)} valid ({class_str})")
+
     return data_yaml
+
+
+def get_gpu_info():
+    """Get GPU name and memory."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            return f"{gpu_name} ({gpu_mem:.0f}GB)"
+    except Exception:
+        pass
+    return "unknown GPU"
+
+
+def format_duration(seconds):
+    """Format seconds as human readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.0f}m"
+    else:
+        hours = seconds // 3600
+        mins = (seconds % 3600) // 60
+        return f"{hours:.0f}h {mins:.0f}m"
 
 
 def read_epoch():
@@ -364,17 +396,25 @@ def train(config, start_epoch, data_yaml):
     # Load model
     model_name = config.get('model', 'yolo12m.pt')
     total_epochs = config.get('epochs', 120)
-    ntfy(f"🏋️ [{JOB_ID}] Training starting: {model_name}, {total_epochs} epochs")
+    patience = config.get('patience', TRAIN_DEFAULTS['patience'])
+    gpu_info = get_gpu_info()
+
+    # Track training start time
+    training_start_time = time.time()
+    epoch_1_time = None  # Will be set after epoch 1
 
     if start_epoch > 0 and CHECKPOINT_FILE.exists():
         print(f"Resuming from checkpoint at epoch {start_epoch}")
+        ntfy(f"🔄 [{JOB_ID}] Resuming from epoch {start_epoch}/{total_epochs} on {gpu_info}")
         model = YOLO(str(CHECKPOINT_FILE))
     else:
         print(f"Starting fresh with {model_name}")
+        ntfy(f"🏋️ [{JOB_ID}] Training starting: {model_name}, {total_epochs} epochs on {gpu_info}")
         model = YOLO(model_name)
 
     # Epoch tracking callback
     def on_train_epoch_end(trainer):
+        nonlocal epoch_1_time
         epoch = trainer.epoch
         write_epoch(epoch)
 
@@ -383,8 +423,14 @@ def train(config, start_epoch, data_yaml):
         if loss is not None and (math.isnan(loss) or loss > 100):
             raise NaNDetected(epoch)
 
-        # Send progress notification: epoch 1 (proof of life), then every 10
-        if epoch == 1 or (epoch > 0 and epoch % 10 == 0):
+        # Send progress notification: epoch 1 (with ETA), then every 10
+        if epoch == 1:
+            epoch_1_time = time.time() - training_start_time
+            remaining_epochs = total_epochs - epoch
+            eta_seconds = epoch_1_time * remaining_epochs
+            loss_str = f"{float(loss):.3f}" if loss is not None else "?"
+            ntfy(f"📊 [{JOB_ID}] Epoch 1/{total_epochs} - loss: {loss_str}, ETA: ~{format_duration(eta_seconds)}")
+        elif epoch > 0 and epoch % 10 == 0:
             loss_str = f"{float(loss):.3f}" if loss is not None else "?"
             ntfy(f"📊 [{JOB_ID}] Epoch {epoch}/{total_epochs} - loss: {loss_str}")
 
@@ -419,17 +465,32 @@ def train(config, start_epoch, data_yaml):
     # Train
     results = model.train(**train_args)
 
+    # Calculate training duration
+    training_duration = time.time() - training_start_time
+    duration_str = format_duration(training_duration)
+
     # Mark complete
     write_epoch('complete')
 
     # Extract metrics
     metrics = {}
+    final_epoch = total_epochs
     if hasattr(results, 'results_dict'):
         rd = results.results_dict
         metrics['recall'] = rd.get('metrics/recall(B)', 0)
         metrics['precision'] = rd.get('metrics/precision(B)', 0)
         metrics['mAP50'] = rd.get('metrics/mAP50(B)', 0)
         metrics['mAP50-95'] = rd.get('metrics/mAP50-95(B)', 0)
+
+    # Check for early stopping (training stopped before total_epochs)
+    if hasattr(results, 'epoch'):
+        final_epoch = results.epoch + 1  # epoch is 0-indexed
+        if final_epoch < total_epochs:
+            ntfy(f"⏹️ [{JOB_ID}] Early stopped at epoch {final_epoch}/{total_epochs} (patience={patience})")
+
+    # Add training stats to metrics for logging
+    metrics['training_time'] = training_duration
+    metrics['final_epoch'] = final_epoch
 
     return metrics
 
