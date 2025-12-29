@@ -136,11 +136,15 @@ def main():
         choice = input("\n> ").strip().lower()
 
         if choice == 'l':
-            # Just launch - get instance type and go
+            # Just launch - get instance type and launch options
             print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge):")
             instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
-            create_spot_request(job_id, instance_type, saved_bucket, infra)
-            print("\nTraining started!")
+            print("\n  Launch type:")
+            print("    [S]pot - may wait for capacity")
+            print("    [O]n-demand - starts immediately")
+            launch_type = input("  [S]: ").strip().lower() or "s"
+            use_spot = launch_type != 'o'
+            launch_instance(job_id, instance_type, saved_bucket, infra, use_spot)
             return
         elif choice != 'o':
             print("Cancelled.")
@@ -270,6 +274,7 @@ def main():
     print(f"  Job ID:   {job_id}")
     print(f"  Model:    {training_config['model']}")
     print(f"  Instance: {training_config['instance_type']}")
+    print(f"  Launch:   {'spot' if training_config.get('use_spot', True) else 'on-demand'}")
     print(f"  Epochs:   {training_config['epochs']}")
     print(f"  Bucket:   {bucket}")
 
@@ -291,10 +296,14 @@ def main():
     # Step 8: Upload to S3
     upload_to_s3(job_dir, bucket, job_id)
 
-    # Step 9: Create spot request
-    create_spot_request(job_id, training_config['instance_type'], bucket, infra)
-
-    print("\nTraining started!")
+    # Step 9: Launch instance
+    launch_instance(
+        job_id,
+        training_config['instance_type'],
+        bucket,
+        infra,
+        training_config.get('use_spot', True)
+    )
 
 
 def load_infra_config():
@@ -607,12 +616,19 @@ def get_training_config():
     print("\n  Instance (common: g5.xlarge, g5.2xlarge, g4dn.xlarge, p3.2xlarge):")
     instance_type = input("  [g5.xlarge]: ").strip() or "g5.xlarge"
 
+    print("\n  Launch type:")
+    print("    [S]pot - may wait for capacity")
+    print("    [O]n-demand - starts immediately")
+    launch_type = input("  [S]: ").strip().lower() or "s"
+    use_spot = launch_type != 'o'
+
     epochs = int(input("\n  Epochs [120]: ").strip() or "120")
     batch = int(input("  Batch [16]: ").strip() or "16")
 
     return {
         'model': model,
         'instance_type': instance_type,
+        'use_spot': use_spot,
         'epochs': epochs,
         'batch': batch,
         'imgsz': 640,
@@ -865,21 +881,35 @@ def upload_to_s3(job_dir, bucket, job_id):
     print(f"  Synced {count} files")
 
 
-def create_spot_request(job_id, instance_type, bucket, infra):
-    """Create a persistent spot request for this job."""
+def launch_instance(job_id, instance_type, bucket, infra, use_spot=True):
+    """Launch a spot or on-demand instance for this job."""
     ec2 = boto3.client('ec2')
 
-    # Check if already running
-    response = ec2.describe_spot_instance_requests(
+    # Check if already running (spot request)
+    if use_spot:
+        response = ec2.describe_spot_instance_requests(
+            Filters=[
+                {'Name': 'state', 'Values': ['open', 'active']},
+                {'Name': 'tag:JobId', 'Values': [job_id]}
+            ]
+        )
+        if response['SpotInstanceRequests']:
+            print(f"\nSpot request already exists for {job_id}")
+            return
+
+    # Check if already running (on-demand instance)
+    response = ec2.describe_instances(
         Filters=[
-            {'Name': 'state', 'Values': ['open', 'active']},
+            {'Name': 'instance-state-name', 'Values': ['pending', 'running']},
             {'Name': 'tag:JobId', 'Values': [job_id]}
         ]
     )
-    if response['SpotInstanceRequests']:
-        print(f"\nSpot request already exists for {job_id}")
-        return
+    for reservation in response['Reservations']:
+        if reservation['Instances']:
+            print(f"\nInstance already running for {job_id}")
+            return
 
+    launch_type_str = "spot" if use_spot else "on-demand"
     ntfy_topic = infra.get('ntfy_topic', '')
     user_data = f"""#!/bin/bash
 set -e  # Exit on error
@@ -898,7 +928,7 @@ ntfy() {{
 exec > >(tee /var/log/user-data.log) 2>&1
 
 echo "Starting job {job_id} at $(date)"
-ntfy "🚀 [{job_id}] EC2 spot fulfilled, bootstrapping..."
+ntfy "🚀 [{job_id}] Instance started ({launch_type_str}), bootstrapping..."
 
 # Get region from instance metadata
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
@@ -972,8 +1002,8 @@ ntfy "✅ [{job_id}] Job complete - shutting down"
 
     user_data_b64 = base64.b64encode(user_data.encode()).decode()
 
-    # Build launch specification
-    launch_spec = {
+    # Common instance config
+    instance_config = {
         'ImageId': infra['ami_id'],
         'InstanceType': instance_type,
         'UserData': user_data_b64,
@@ -981,37 +1011,52 @@ ntfy "✅ [{job_id}] Job complete - shutting down"
         'SecurityGroupIds': [infra['security_group_id']],
         'IamInstanceProfile': {'Name': infra['iam_instance_profile']},
         'BlockDeviceMappings': [
-                {
-                    'DeviceName': '/dev/sda1',
-                    'Ebs': {
-                        'VolumeSize': 100,
-                        'VolumeType': 'gp3',
-                        'DeleteOnTermination': True
-                    }
+            {
+                'DeviceName': '/dev/sda1',
+                'Ebs': {
+                    'VolumeSize': 100,
+                    'VolumeType': 'gp3',
+                    'DeleteOnTermination': True
                 }
-            ]
-        }
+            }
+        ]
+    }
 
     # Add SSH key if configured
     if infra.get('key_name'):
-        launch_spec['KeyName'] = infra['key_name']
+        instance_config['KeyName'] = infra['key_name']
 
-    ec2.request_spot_instances(
-        InstanceCount=1,
-        Type='one-time',
-        LaunchSpecification=launch_spec,
-        TagSpecifications=[
-            {
-                'ResourceType': 'spot-instances-request',
-                'Tags': [
-                    {'Key': 'Name', 'Value': f'trainer-{job_id}'},
-                    {'Key': 'JobId', 'Value': job_id}
-                ]
-            }
-        ]
-    )
+    tags = [
+        {'Key': 'Name', 'Value': f'trainer-{job_id}'},
+        {'Key': 'JobId', 'Value': job_id}
+    ]
 
-    print(f"\nCreated spot request for {job_id} on {instance_type}")
+    if use_spot:
+        ec2.request_spot_instances(
+            InstanceCount=1,
+            Type='one-time',
+            LaunchSpecification=instance_config,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'spot-instances-request',
+                    'Tags': tags
+                }
+            ]
+        )
+        print(f"\nCreated spot request for {job_id} on {instance_type}")
+    else:
+        ec2.run_instances(
+            MinCount=1,
+            MaxCount=1,
+            **instance_config,
+            TagSpecifications=[
+                {
+                    'ResourceType': 'instance',
+                    'Tags': tags
+                }
+            ]
+        )
+        print(f"\nLaunched on-demand instance for {job_id} on {instance_type}")
 
 
 if __name__ == '__main__':
