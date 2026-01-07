@@ -2,7 +2,7 @@
 """
 One-time AWS infrastructure setup for EC2 YOLO Training.
 
-Creates: S3 bucket, EFS, Security Group, IAM role, and saves config.
+Creates: S3 bucket, Security Group, IAM role, and saves config.
 
 Usage:
     python setup.py
@@ -93,7 +93,7 @@ def main():
     try:
         sg_response = ec2.create_security_group(
             GroupName='yolo-trainer',
-            Description='YOLO training instances - no inbound except EFS',
+            Description='YOLO training instances - outbound only',
             VpcId=vpc_id
         )
         sg_id = sg_response['GroupId']
@@ -108,68 +108,9 @@ def main():
             sg_id = sgs[0]['GroupId']
         else:
             raise
-
-    # Add NFS rule from itself
-    try:
-        ec2.authorize_security_group_ingress(
-            GroupId=sg_id,
-            IpPermissions=[{
-                'IpProtocol': 'tcp',
-                'FromPort': 2049,
-                'ToPort': 2049,
-                'UserIdGroupPairs': [{'GroupId': sg_id}]
-            }]
-        )
-    except ec2.exceptions.ClientError as e:
-        if 'already exists' not in str(e):
-            raise
     print(f"    ✓ {sg_id}")
 
-    # 3. EFS
-    print("  Creating EFS file system...")
-    efs = boto3.client('efs')
-
-    # Check for existing
-    existing = efs.describe_file_systems()['FileSystems']
-    existing = [fs for fs in existing if any(t.get('Value') == 'yolo-trainer' for t in fs.get('Tags', []))]
-
-    if existing:
-        efs_id = existing[0]['FileSystemId']
-    else:
-        efs_response = efs.create_file_system(
-            PerformanceMode='generalPurpose',
-            ThroughputMode='bursting',
-            Tags=[{'Key': 'Name', 'Value': 'yolo-trainer'}]
-        )
-        efs_id = efs_response['FileSystemId']
-
-        # Wait for available
-        while True:
-            status = efs.describe_file_systems(FileSystemId=efs_id)['FileSystems'][0]['LifeCycleState']
-            if status == 'available':
-                break
-            time.sleep(2)
-    print(f"    ✓ {efs_id}")
-
-    # 4. EFS Mount Target
-    print("  Creating EFS mount target...")
-    try:
-        efs.create_mount_target(
-            FileSystemId=efs_id,
-            SubnetId=subnet_id,
-            SecurityGroups=[sg_id]
-        )
-        # Wait for mount target
-        while True:
-            mts = efs.describe_mount_targets(FileSystemId=efs_id)['MountTargets']
-            if mts and mts[0]['LifeCycleState'] == 'available':
-                break
-            time.sleep(2)
-    except efs.exceptions.MountTargetConflict:
-        pass  # Already exists
-    print(f"    ✓ Mount target in {az}")
-
-    # 5. IAM Role
+    # 3. IAM Role
     print("  Creating IAM role...")
     iam = boto3.client('iam')
 
@@ -194,7 +135,6 @@ def main():
     # Attach policies
     policies = [
         'arn:aws:iam::aws:policy/AmazonS3FullAccess',
-        'arn:aws:iam::aws:policy/AmazonElasticFileSystemClientFullAccess',
         'arn:aws:iam::aws:policy/AmazonEC2FullAccess',
     ]
     for policy in policies:
@@ -221,12 +161,11 @@ def main():
 
     # Save config
     config = {
-        'efs_id': efs_id,
+        'bucket': bucket_name,
         'subnet_id': subnet_id,
         'security_group_id': sg_id,
         'iam_instance_profile': 'yolo-trainer',
-        'ami_id': 'ami-0ce8c5eb104aa745d',  # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Ubuntu 22.04)
-        'bucket': bucket_name,
+        'ami_id': 'ami-03d235ac935098e03',  # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Ubuntu 22.04)
     }
 
     with open(CONFIG_FILE, 'w') as f:
